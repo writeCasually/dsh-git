@@ -1,0 +1,177 @@
+# dsh-git · 设计文档
+
+> 面向 DeepSeek Harness 的 Git 插件：展示 agent 修改差异、按版本恢复、以及常用 git 操作面板。
+> 状态：设计已评审定稿（2026-08），进入实施阶段。
+
+## 1. 目标
+
+1. **修改差异展示**：每次 agent 修改代码后，及时、就地展示修改内容与差异。
+2. **版本保留与恢复**：同一会话内 agent 的每次修改都被保留；用户可将工作区恢复到任意历史版本（支持按区域/文件/全部粒度）。
+3. **git 操作界面**：按钮式执行常用 git 操作，查看 git 状态与文件预览。
+
+设计原则：**尽量复用 DSH 既有能力**（会话日志、事件流、Slots、审批链），不自建版本管理系统、不污染用户分支历史。
+
+## 2. 术语
+
+| 术语 | 含义 |
+|---|---|
+| 版本（V1…Vn） | 一个**发生了文件变更的 agent 回合**（`turn`）形成的账本条目；V0 = 会话起始基线 |
+| 账本（Ledger） | 从会话日志派生的、**只增不改**的版本记录流 |
+| 快照（Checkpoint） | 每个版本边界对工作区全量建树（含未提交/未跟踪内容），存到私有 ref，**只增不减** |
+| 恢复（Restore） | 把"当前工作区 → 目标版本"的差异按用户勾选范围应用；不移动分支指针、不改写历史 |
+| 写回（Write-back） | 恢复/提交流程通过 `agent.followup()` 把结果作为消息注入会话，消除下一轮的"信息差" |
+
+## 3. 架构总览
+
+```
+┌─ Client（浏览器）───────────────────────────────────────────────┐
+│  DiffViewer 组件（三模式复用）                                   │
+│   ├ 回合摘要卡 compact   → conversation.chat.turnTail           │
+│   ├ 变更抽屉   inline    → shell.overlay 自绘（可切换全屏）       │
+│   └ Git 面板   full      → shell.overlay 自绘（大面积/文件预览）   │
+│   [Git] 开关 → conversation.session.header.actions               │
+└──────────────┬──────────────────────────────────────────────────┘
+               │ host.call（JSON，Client→Host）
+┌─ Host（dsh 进程内）─────────────────────────────────────────────┐
+│  事件: session/event（实时捕获 fs 变更）                         │
+│        agent/turn-stopping（版本边界 → 建快照）                   │
+│        agent/status（idle ⇄ running → 写操作互斥）               │
+│  ModLedger   —— 内存 + 可从 sessionQuery.listEvents 重建（零持久化）│
+│  GitRunner   —— subprocess.spawn 参数化执行（白名单命令集）        │
+│  CheckpointStore —— 私有 ref `refs/dsh-git/ckpt/<session>/<V>`   │
+│  RPC handlers: status / diff / ledger / restore / ops / commit   │
+│  Write-back: agent.followup() 注入用户消息                       │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## 4. 复用地图（DSH 既有能力，均已核实）
+
+| 能力 | 证据 | 复用方式 |
+|---|---|---|
+| 每次 write/edit 的逐 hunk diff 持久化 | `packages/fs/tool-fs/src/diff.ts` — `FsDiffMeta { diffs }`，随 `tool/result.meta` 落盘，可回放 | 版本账本与 diff 展示的**数据源** |
+| 工具参数全量持久化 | `packages/core/session/src/types.ts` — `tool/call { turn, step, name, arguments }` | write/edit 参数可核对、可反演（兜底） |
+| 回合号 turn | 同上 | 版本边界天然 = turn |
+| 实时变更事件 | Host `session/event`（emit，Scope） | 实时捕获 fs 变更 |
+| 回合边界时钟 | `agent/turn-stopping`（serial，await，带 turn） | 快照时机 |
+| 历史读取 | `sessionQuery.listEvents(sessionId)` / `sessionPersistence.readFrom(id, seq)` | 跨重启重建账本 |
+| 会话写回 | `Agent.followup(input)`（next-turn + wakeup） | 恢复/提交流程注入消息，agent 下一轮必读 |
+| Host 执行 git | `subprocess.spawn`（subprocess-local 原生 child_process，**无沙盒**，网络/凭据同终端） | 插件侧可 push（走危险区+审批） |
+| 文件预览 | `fs.readText` | 面板预览 |
+| UI 挂载点 | Slots 实测：`turnTail`（chain）、`header.actions`（list）、`shell.overlay`（list）、`input.dock`（list）——均 additive | 三表面落位 |
+| 审批链 | `approval.request`（留痕到会话日志） | 危险 git 操作的人工审批 |
+
+> 实测证据（本机 ~/.dsh/sessions/…/session.jsonl.zstd）：会话日志为 zstd JSONL 追加式存储，`tool/call`（含 name/arguments/turn）与 `tool/result`（含 meta）逐条落盘。
+
+## 5. 需求 1：修改差异展示
+
+- **回合摘要卡**（主战场）：`conversation.chat.turnTail`，回合结束后渲染 `本回合修改 3 文件 · +24 −10 [展开]`，展开为逐文件逐 hunk diff。内容少时天然在聊天流内。
+- **变更抽屉**（增强）：`shell.overlay` 右侧抽屉，浏览任意历史版本的完整 diff（DiffViewer `inline`）。
+- **DiffViewer 组件**：唯一的 diff 渲染组件，三种模式（compact/inline/full）由 props 切换；输入统一为 `FileDiff[]`；数据源优先级：会话日志持久化 meta → Host 用 git/text diff 补算（bash 造成的改动由此补上）→ raw text 兜底。
+
+## 6. 需求 2：版本账本与恢复（只增）
+
+### 6.1 账本（append-only，两类条目）
+
+```
+V1 ← 回合修改 (turn 3)     diff vs V0
+V2 ← 回合修改 (turn 5)     diff vs V1
+V3 ← 回合修改 (turn 6)     diff vs V2
+V4 ← 恢复至 V2（用户触发）  diff vs V3   ← 新增条目，V3 记录不变
+V5 ← 回合修改 (turn 8)     diff vs V4   ← agent 在恢复态之上继续
+```
+
+- 每回合边界（`agent/turn-stopping`，且当回合含 fs 变更）生成快照并追加条目。
+- 账本可从持久会话日志全量重建；快照（git 私有 ref commit）随 repo 留存，跨重启一致。
+- **只增不减（决策）**：快照与账本条目均不自动清理，符合 DSH 追加式日志理念。膨胀风险由 git 对象内容寻址/去重缓解（见 §12）。
+
+### 6.2 恢复
+
+- **语义**：恢复 = 把"当前工作区 → 目标版本"的差异按用户勾选范围应用。
+- **与提交状态无关（决策）**：快照在边界时对**整个工作区**建树（未提交/已暂存/未跟踪全部收录），恢复预览与执行都基于文件真实内容，`git commit` 与否不影响恢复能力；恢复本身不自动 commit、不自动 stage（可选 stage）。
+- **粒度三档**：全部（一键整版）/ 文件（勾选文件）/ 区域（展开到 hunk 逐条勾选）。逐 hunk 恢复对相互依赖的 hunk 给出提示；恢复后账本追加 `Vn+1 = 部分恢复到 V3 (2/4 文件)`。
+- **写回会话（决策）**：恢复完成后 `agent.followup("已将工作区恢复到 V3，涉及 …")`，agent 下一轮必读，避免信息差；默认唤醒，可配置为静默。
+
+### 6.3 降级
+
+- 非 git 工作区：插件数据目录下影子快照（`<data>/dsh-git/snapshots/<session>/<V>/`），仅拷贝被改文件。
+- 两者皆无：尝试按会话记录反演（edit 反向 + write 全量），UI 明确标注"可能发散"。
+
+## 7. 需求 3：git 操作面板
+
+- 形态：`shell.overlay` 全屏/大区面板，承载状态、变更、版本时间线、提交四个视图；可从变更抽屉切换全屏。
+- **操作集分级**：
+
+| 级别 | 操作 | 确认强度 |
+|---|---|---|
+| L0 只读 | status / diff / log / branch 查看 / 文件预览 | 无 |
+| L1 常见写 | stage / unstage / commit / restore 单文件 / stash / fetch / pull | 单确认 |
+| L2 危险写（决策） | push / reset --hard / 删分支 / 整版恢复 | 双确认 + `approval.request` 审批链（留痕会话日志） |
+
+- **commit message（决策）**：输入框默认自动生成（`dsh: <会话标题> (#Vn, N 文件)`），可手改；提供"让 agent 起草"按钮——经 `agent.followup` 请 agent 结合变更内容拟 message，回复可一键套用。L1 单确认，不进审批链。
+- 面板写操作在 agent 运行时（`agent/status != idle`）整体禁用。
+
+## 8. Host/Client 数据契约（RPC，host.call）
+
+| method | 入参 | 出参 |
+|---|---|---|
+| `git.status` | – | `{ branch, ahead/behind, staged[], unstaged[], untracked[] }`（porcelain 解析） |
+| `git.diff` | `{ path?, base?, target? }` | `FileDiff[]`（懒加载，先 numstat 后按文件） |
+| `ledger.list` | – | `LedgerEntry[]`（版本号/时间/文件数/增减/条目类型） |
+| `ledger.preview` | `{ version, files?, hunks? }` | 将应用的 `FileDiff[]`（当前工作区 ↔ 目标快照） |
+| `ledger.restore` | `{ version, files?, hunks?, stage? }` | 结果 + 新账本条目；随后 Host 触发写回 |
+| `git.ops` | `{ op, params }`（白名单） | 结果；L2 操作先走审批 |
+| `file.read` | `{ path }` | 文件文本（含大小/二进制标记） |
+| `agent.pulse` | – | `{ status: idle/running, revision }`（面板轮询） |
+
+约束：往返仅 JSON；大 diff 分批；危险操作返回审批态由客户端轮询收敛。
+
+## 9. 安全与并发
+
+- git 命令一律 `subprocess.spawn` 参数化执行（**不拼 shell 字符串**），命令集白名单。
+- L2 操作经既有 `approval.request` 审批，答案与留痕进入会话日志。
+- 互斥：agent `running` 时禁一切面板写操作；恢复/commit/push 前复查 `agent.status`。
+- 恢复覆盖未提交内容属预期行为，但预览必须完整展示将变更文件（含会话外改动），确认后才执行。
+
+## 10. 调试与交付环境
+
+- **运行/调试实例**：`/Users/strikingly/workspace/deepseek-harness`（apps/web 构建 shell，验证 URL：`http://127.0.0.1:3080`，改动后需刷新验证）。
+- **运行实例拓扑（已勘察，2026-08）**：
+  - profile：`~/.dsh/profiles/web/`；组合 = bundles `@deepseek-ai/dsh-base` + `@deepseek-ai/dsh-web-app` + `@anysearch/anysearch-dsh`；
+  - 用户补丁层：`~/.dsh/profiles/web/cordis.patch.yml`（当前 `[]`）——挂 host 行/补丁的唯一入口；
+  - client 模块：包 `package.json` 带 `dsh.client` 标记（platform: web、`./client` export、tsdown 构建到 lib/），由 clientModules 服务增量扫描并打入 web 启动图。
+- **移植正式包路径**：在 dsh 仓库新建包（如 `packages/git/dsh-git`，host 插件 + client 模块 + `dsh.client` 标记）→ `tsdown` 构建 → profile patch 加行/加入 bundles → web 产物重建 → 刷新 3080 验证。host 行加载与实例重启策略待确认后执行。
+- **开发迭代**：P0/P1 用动态 Cordis 插件（零构建）已完成验证：会话日志 meta 读回、插件侧 git 子进程（无沙盒、可 push）、Slot 渲染、RPC 闭环。注意：**双向 RPC 只收合法 JSON，参数不得含 `undefined`**（宁省略字段）；define 大载荷粘贴易失真（同内容 new 模式可过）。
+- **交付物**：最终插件源码与文档落在 `deepseek-harness-plugins/plugins/dsh-git`（本仓库）。
+
+## 11. 实施阶段
+
+| 阶段 | 内容 | 完成口径 |
+|---|---|---|
+| P0 可行性 | 会话日志 meta 读回 / git 子进程 / 事件边界 / turnTail+overlay 渲染 —— 动态插件 Demo | 动态插件跑通端到端最小链路 |
+| P1 MVP | Git 面板（status/diff/预览/commit/branch）+ 回合摘要卡 | 本会话可用 |
+| P2 版本与恢复 | 账本 + 边界快照 + 三档恢复 + 写回会话 + 互斥/审批 | 恢复正确、分支历史零污染 |
+| P3 打磨 | 非 git 降级、大 diff 性能、主题适配、写回开关、导出打包 | 长时间会话稳定 |
+
+## 12. 风险与缓解
+
+| 风险 | 缓解 |
+|---|---|
+| bash 造成的改动不进账本 | diff 展示用 git diff 补齐；快照为全量建树，恢复不受影响 |
+| 只增不减 → 私有 ref 对象累积 | git 内容寻址去重；提供可选"导出/归档"打包，默认不删 |
+| 大仓库 status/diff 慢 | porcelain + numstat 预检 + 按文件懒加载 |
+| 恢复覆盖用户手改/会话外改动 | 预览完整列出 + 逐文件/hunk 勾选 + 确认 |
+| 写回唤醒 agent 产生新回合 | 默认唤醒（信息差优先），提供"静默写回"开关 |
+| 会话跨重启 | 账本由持久日志重建，快照在 repo ref 中，天然一致 |
+
+## 13. 决策记录（本评审确认）
+
+1. 恢复 = 正向应用快照，账本只增，不叫"回滚"。✅
+2. 快照与账本只增不减。✅
+3. 恢复后写回会话（agent.followup），消除信息差。✅
+4. commit message 可默认生成，可让 agent 起草。✅
+5. 恢复与提交状态无关（快照覆盖整个工作区）。✅
+6. push 等高危操作入面板，但走危险区 + 双确认 + approval 审批。✅
+7. diff 为共享组件，三个表面（turnTail / 抽屉 / 全屏面板）复用。✅
+8. 恢复粒度支持 区域 hunk / 文件 / 全部。✅
+9. 插件 Host 侧不受 agent 沙盒约束，执行 git 等同终端能力。✅
+10. 调试环境：dsh 实例 `/Users/strikingly/workspace/deepseek-harness`。✅
