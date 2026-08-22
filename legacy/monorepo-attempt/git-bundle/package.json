@@ -1,0 +1,15 @@
+{
+  "name": "dsh-git-bundle",
+  "version": "0.1.0",
+  "private": true,
+  "description": "dsh-git profile bundle: mounts the dsh-git host service and web client module as a bundle layer (dev: links to the plugin-workspace host/client).",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "dependencies": {
+    "dsh-git": "link:../dsh-git",
+    "dsh-git-client": "link:../dsh-git-client"
+  }
+}

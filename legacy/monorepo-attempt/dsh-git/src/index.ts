@@ -7,5 +7,5 @@ export type {
   ReadArgs,
   ReadResult,
   StatusResult,
-} from './service.ts'
+} from './types.ts'
 export { default } from './service.ts'

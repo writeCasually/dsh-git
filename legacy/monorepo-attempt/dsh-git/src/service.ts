@@ -5,56 +5,42 @@
  * NOTE (draft for build iteration): the @Remote decoration and RemoteResult
  * envelope shape mirror @deepseek-ai/dsh-message-feedback; verify against the
  * typert build before release.
- * @module @deepseek-ai/dsh-git
+ * @module dsh-git
  */
 
 import { Context } from '@deepseek-ai/cordis'
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
+// Type-only: activate the cordis Context merges (ctx.subprocess / sessionQuery / fs).
+import type {} from '@deepseek-ai/dsh-subprocess'
+import type {} from '@deepseek-ai/dsh-session-query'
+import type {} from '@deepseek-ai/dsh-fs'
 
-export interface StatusResult {
-  branch: string
-  ahead: number
-  behind: number
-  staged: readonly string[]
-  unstaged: readonly string[]
-  untracked: readonly string[]
-  cwd: string
-}
+import type {
+  CommitArgs,
+  CommitResult,
+  DiffArgs,
+  DiffResult,
+  ReadArgs,
+  ReadResult,
+  StatusResult,
+} from './types.ts'
 
-export interface DiffArgs {
-  sessionId: SessionId
-  staged?: boolean
-  path?: string
-}
-
-export interface DiffResult {
-  diff: string
-}
-
-export interface CommitArgs {
-  sessionId: SessionId
-  message: string
-}
-
-export interface CommitResult {
-  output: string
-}
-
-export interface ReadArgs {
-  sessionId: SessionId
-  path: string
-}
-
-export interface ReadResult {
-  text: string
-}
+export type {
+  CommitArgs,
+  CommitResult,
+  DiffArgs,
+  DiffResult,
+  ReadArgs,
+  ReadResult,
+  StatusResult,
+} from './types.ts'
 
 /** Parse `git status --porcelain=v1 -b` into grouped file lists. */
 function parseStatus(out: string): Omit<StatusResult, 'cwd'> {
   const lines = out.split('\n').filter((line) => line.length > 0)
   const branchLine = lines.find((line) => line.startsWith('## ')) ?? ''
-  const branch = branchLine.length > 3 ? branchLine.slice(3).split(' ')[0] : '(detached)'
+  const branch = branchLine.length > 3 ? (branchLine.slice(3).split(' ')[0] ?? '(detached)') : '(detached)'
   let ahead = 0
   let behind = 0
   const bracket = branchLine.indexOf('[')

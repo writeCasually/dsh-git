@@ -1,0 +1,5 @@
+- insert:
+    - id: dsh-git
+      name: 'dsh-git'
+    - id: dsh-git-client
+      name: 'dsh-git-client'

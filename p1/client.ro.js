@@ -2,7 +2,17 @@ return {
   apply(ctx) {
     const slots = ctx.get('slots')
     if (slots === undefined) return
-    ctx.effect(() => styles.insert('.gp{position:fixed;top:64px;right:16px;width:470px;max-width:94vw;max-height:calc(100vh - 96px);overflow:auto;background:rgba(255,255,255,0.97);color:#1a1a1a;border:1px solid rgba(0,0,0,0.15);border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,0.25);z-index:2000;padding:14px;font:13px/1.5 system-ui,sans-serif;pointer-events:auto;box-sizing:border-box}.gt{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;font-weight:600}.gr{display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap;align-items:center}.gb{background:rgba(0,0,0,0.07);border:1px solid rgba(0,0,0,0.12);border-radius:8px;padding:3px 9px;cursor:pointer;font-size:12px}.go{background:rgba(0,0,0,0.16)}.gs{font-weight:600;margin:10px 0 6px;color:#444}.gw{display:flex;justify-content:space-between;gap:8px;padding:3px 0;border-bottom:1px solid rgba(0,0,0,0.08);cursor:pointer}.gw:hover{background:rgba(0,0,0,0.04)}.gp2{background:rgba(0,0,0,0.06);border-radius:6px;padding:8px;white-space:pre-wrap;word-break:break-all;margin:4px 0;font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;max-height:340px;overflow:auto}.ge{color:#b3261e;white-space:pre-wrap}.gm{color:#666;font-size:12px}'))
+    ctx.effect(() => styles.insert('.gp{position:fixed;top:64px;right:16px;width:470px;max-width:94vw;max-height:86vh;overflow:auto;background:#fff;color:#1a1a1a;border:1px solid rgba(0,0,0,.15);border-radius:12px;box-shadow:0 4px 20px rgba(0,0,0,.3);z-index:2000;padding:14px;font:13px/1.5 system-ui,sans-serif;pointer-events:auto;box-sizing:border-box}
+.gt{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;font-weight:600}
+.gr{display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap;align-items:center}
+.gb{background:rgba(0,0,0,.07);border:1px solid rgba(0,0,0,.12);border-radius:8px;padding:3px 9px;cursor:pointer;font-size:12px}
+.go{background:rgba(0,0,0,.16)}
+.gs{font-weight:600;margin:10px 0 6px;color:#444}
+.gw{display:flex;justify-content:space-between;gap:8px;padding:3px 0;border-bottom:1px solid rgba(0,0,0,.08);cursor:pointer}
+.gw:hover{background:rgba(0,0,0,.04)}
+.gp2{background:rgba(0,0,0,.06);border-radius:6px;padding:8px;white-space:pre-wrap;word-break:break-all;margin:4px 0;font:12px/1.4 ui-monospace,Menlo,monospace;max-height:36vh;overflow:auto}
+.ge{color:#b3261e;white-space:pre-wrap}
+.gm{color:#666;font-size:12px}');color:#1a1a1a;border:1px solid rgba(0,0,0,0.15);border-radius:12px;box-shadow:0 4px 20px rgba(0,0,0,0.3);z-index:2000;padding:14px;font:13px/1.5 system-ui,sans-serif;pointer-events:auto;box-sizing:border-box}.gt{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;font-weight:600}.gr{display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap;align-items:center}.gb{background:rgba(0,0,0,0.07);border:1px solid rgba(0,0,0,0.12);border-radius:8px;padding:3px 9px;cursor:pointer;font-size:12px}.go{background:rgba(0,0,0,0.16)}.gs{font-weight:600;margin:10px 0 6px;color:#444}.gw{display:flex;justify-content:space-between;gap:8px;padding:3px 0;border-bottom:1px solid rgba(0,0,0,0.08);cursor:pointer}.gw:hover{background:rgba(0,0,0,0.04)}.gp2{background:rgba(0,0,0,0.06);border-radius:6px;padding:8px;white-space:pre-wrap;word-break:break-all;margin:4px 0;font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;max-height:36vh;overflow:auto}.ge{color:#b3261e;white-space:pre-wrap}.gm{color:#666;font-size:12px}'))
 
     const state = { open: false, sessionId: null }
     const listeners = new Set()
