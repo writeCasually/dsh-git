@@ -202,6 +202,26 @@ async function dispatch(ctx, method, args) {
     const text = await ctx.fs.readText(target)
     return { text: text.slice(0, 60_000) }
   }
+  if (method === 'turnOf') {
+    if (typeof args.messageId !== 'string') throw new Error('messageId required')
+    let lastSeq = args.upToSeq
+    if (typeof lastSeq !== 'number' || !Number.isFinite(lastSeq)) {
+      const surface = await ctx.sessionQuery.readSurface(args.sessionId)
+      lastSeq = surface ? (surface.lastSeq ?? 0) : 0
+    }
+    const fromSeq = Math.max(0, lastSeq - 20000)
+    const persistence = ctx.sessionPersistence || ctx.sessionQuery
+    const snap = persistence.readFrom
+      ? await persistence.readFrom(args.sessionId, fromSeq)
+      : { events: (await ctx.sessionQuery.readSession(args.sessionId)).events }
+    let turn = null
+    for (const ev of snap.events || []) {
+      if (ev.type !== 'assistant/message') continue
+      const p = ev.data !== undefined ? ev.data : ev
+      if (p.message && p.message.id === args.messageId) { turn = p.turn; break }
+    }
+    return { turn }
+  }
   if (method === 'turnDiff') {
     return await turnDiff(ctx, args.sessionId, args.turn, args.upToSeq)
   }
