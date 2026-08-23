@@ -1,6 +1,6 @@
 'use strict'
 
-const BUILD_TS = '08-22 22:01'
+const BUILD_TS = '08-23 12:28:01'
 
 const React = require('react')
 
@@ -90,6 +90,53 @@ function hunkText(h) {
   return lines.join('\n')
 }
 
+/** Keyed replacement of the official turn-tail renderer: file-change summary or a minimal footer. */
+function TurnNodeSummary(props) {
+  const node = props && (props.node || props.owner || null)
+  const turn = node ? (node.data && node.data.turn) : undefined
+  const sessionId = state.sessionId
+  const [data, setData] = React.useState(null)
+  const [open, setOpen] = React.useState({})
+  React.useEffect(() => {
+    let alive = true
+    setData(null)
+    setOpen({})
+    if (sessionId == null || turn == null) return
+    if (typeof turn === 'number') { state.tailSeen[turn] = true; emit() }
+    callRemote('dshGit/turnDiff', { sessionId, turn })
+      .then((r) => { if (alive) setData(r ? (r.files || []) : []) })
+      .catch(() => { if (alive) setData([]) })
+    return () => { alive = false }
+  }, [sessionId, turn, state.sessionId])
+  if (!data) return null
+  if (data.length === 0) {
+    return React.createElement('div', { className: 'mt', 'data-dsh-git': 'turn-tail-min' }, `turn ${turn} · 本回合无文件变更`)
+  }
+  const totalAdd = data.reduce((sum, f) => sum + f.add, 0)
+  const totalDel = data.reduce((sum, f) => sum + f.del, 0)
+  return React.createElement(
+    'div',
+    { className: 'ta dshgit-card', 'data-dsh-git': 'turn-summary' },
+    React.createElement('div', { className: 'tm' },
+      React.createElement('span', { className: 'dshgit-tag' }, 'dsh-git'),
+      ` 本回合修改 ${data.length} 个文件 · +${totalAdd} −${totalDel}`),
+    data.map((f) => {
+      const opened = !!open[f.path]
+      return React.createElement('div', { key: f.path },
+        React.createElement('div', { className: 'td', onClick: () => setOpen((o) => ({ ...o, [f.path]: !o[f.path] })) },
+          React.createElement('span', null, f.path),
+          React.createElement('span', null,
+            React.createElement('span', { className: 'ad' }, `+${f.add}`),
+            ' ',
+            React.createElement('span', { className: 'dl' }, `−${f.del}`))),
+        opened && f.hunks.length
+          ? React.createElement('div', { className: 'tl' },
+              f.hunks.map((hx, i) => React.createElement('pre', { className: 'px', key: i }, hunkText(hx))))
+          : null)
+    }),
+  )
+}
+
 /** Codex-style summary under the turn reply: current turn's file changes (turnTail chain). */
 function TurnTailCard(props) {
   const turn = props.matched && props.matched.turn
@@ -164,7 +211,7 @@ function RecentTurns(props) {
     { className: 'ta dshgit-card', 'data-dsh-git': 'recent-turns' },
     React.createElement('div', { className: 'tm' },
       React.createElement('span', { className: 'dshgit-tag' }, 'dsh-git'),
-      ' 最近修改回合'),
+      ` 最近修改回合 · seen=${Object.keys(state.tailSeen || {}).slice(-10).join(',') || '无'}`),
     withFiles.slice().reverse().map((t) =>
       React.createElement('div', { key: t.turn },
         React.createElement('div', { className: 'td', onClick: () => setOpen((o) => ({ ...o, [t.turn]: !o[t.turn] })) },
@@ -306,17 +353,24 @@ exports.apply = function apply(ctx) {
         id: 'dsh-git-panel',
         order: 100,
       }, Panel))
-    const disposeTail = slots.inject('conversation.chat.turnTail', () => {
+    let tailState = 'off'
+    const disposeTail = slots.inject('conversation.chat.node', () => {
       try {
+        tailState = 'on'
+        state.tailSeat = 'on'
+        emit()
         return slots.register({
-          name: 'conversation.chat.turnTail',
-          select: (owner) => {
-            const n = owner && owner.turn && owner.turn.turn
-            return (typeof n === 'number') ? { turn: n } : null
+          name: 'conversation.chat.node',
+          key: 'turn-tail',
+          children: {
+            'conversation.chat.turnTail': { kind: 'chain', scope: 'session' },
+            'conversation.chat.assistant-actions': { kind: 'list', scope: 'session' },
           },
-        }, TurnTailCard)
+        }, TurnNodeSummary)
       } catch (error) {
-        if (typeof console !== 'undefined' && console.error) console.error('[dsh-git] turnTail register failed', error)
+        if (typeof console !== 'undefined' && console.error) console.error('[dsh-git] turn-tail node register failed', error)
+        state.tailSeat = 'err'
+        emit()
         return () => undefined
       }
     })

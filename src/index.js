@@ -94,22 +94,28 @@ async function cwdOf(ctx, sessionId) {
 /** Per-turn modifications around the turn's ending seq: write/edit calls paired with their result-time diff hunks. */
 const windowCache = new Map() // `${sessionId}@${fromSeq}` -> events array (last 2 windows per session kept)
 
-async function turnDiff(ctx, sessionId, turn, upToSeq) {
-  if (typeof turn !== 'number') throw new Error('turn required')
-  if (typeof upToSeq !== 'number' || !Number.isFinite(upToSeq)) upToSeq = Number.MAX_SAFE_INTEGER
-  const fromSeq = Math.max(0, upToSeq - 8000)
-  const cacheKey = sessionId + '@' + fromSeq
-  let events = windowCache.get(cacheKey)
-  if (events === undefined) {
-    const persistence = ctx.sessionPersistence || ctx.sessionQuery
-    const snap = persistence.readFrom
-      ? await persistence.readFrom(sessionId, fromSeq)
-      : { events: (await ctx.sessionQuery.readSession(sessionId)).events }
-    events = snap.events || []
-    windowCache.set(cacheKey, events)
-    const keys = [...windowCache.keys()].filter((k) => k.startsWith(sessionId + '@'))
-    if (keys.length > 2) windowCache.delete(keys[0])
+/** Full-log cache (non-lazy): first call reads everything, later calls extend from the cached watermark. */
+const logCache = new Map()
+
+async function sessionEvents(ctx, sessionId) {
+  let entry = logCache.get(sessionId)
+  const from = entry ? entry.lastSeq + 1 : 0
+  const persistence = ctx.sessionPersistence || ctx.sessionQuery
+  const snap = persistence.readFrom
+    ? await persistence.readFrom(sessionId, from)
+    : { events: (await ctx.sessionQuery.readSession(sessionId)).events }
+  if (!entry) { entry = { events: [], lastSeq: -1 }; logCache.set(sessionId, entry) }
+  const evs = snap.events || []
+  if (evs.length > 0) {
+    entry.events.push(...evs)
+    entry.lastSeq = evs[evs.length - 1].seq
   }
+  return entry.events
+}
+
+async function turnDiff(ctx, sessionId, turn) {
+  if (typeof turn !== 'number') throw new Error('turn required')
+  const events = await sessionEvents(ctx, sessionId)
   const summaries = scanTurns(events, 0)
   const found = summaries.find((s) => s.turn === turn)
   return { files: found ? found.files : [] }

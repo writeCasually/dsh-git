@@ -51,3 +51,5 @@ dsh-git/                      # 仓库根 = 双面包插件包（包名 dsh-git�
 2. `dsh plugin --profile web remove @deepseek-ai/dsh-git-bundle`（若装了历史遗留）
 3. `dsh plugin --profile web add /path/to/dsh-git`
 4. `dsh --profile web --dump-config` 应含 `dsh-git` 行；重启后打开 web UI 会话头部出现 `Git` 按钮
+
+<!-- 验证：回合修改卡 -->
