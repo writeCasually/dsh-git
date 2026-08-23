@@ -177,3 +177,34 @@ V5 ← 回合修改 (turn 8)     diff vs V4   ← agent 在恢复态之上继续
 8. 恢复粒度支持 区域 hunk / 文件 / 全部。✅
 9. 插件 Host 侧不受 agent 沙盒约束，执行 git 等同终端能力。✅
 10. 调试环境：dsh 实例 `/Users/strikingly/workspace/deepseek-harness`。✅
+## 13. 开发记录：P1 回合修改卡（2026-08-23 交接）
+
+### 需求（用户原话要点）
+1. agent 每次修改代码后，**在 agent 回复下方**展示本次修改的文件列表与 diff（参考 Codex 的回合内 diff 总结）；
+2. 官方已有 write/edit 工具卡片的 diff 展示，插件只需做**总结层**（文件 + 增减统计，点开看详情）；
+3. 只在**有文件变动的回合**显示（无变更不占位）。
+
+### 已实现（HEAD=6bf7b00）
+- host（src/index.js，connection.rpc.intercept，无 typert）：
+  - `dshGit/status|diff|commit|readFile`（面板：分支/分组/单文件 diff/提交/预览）；
+  - `dshGit/turnDiff`：**非懒加载全量读 + 水位增量缓存**（`sessionEvents`），任一回合约 5 秒级首次、之后即时；meta 缺失时用 edit 参数（old/new_string）或 write content 合成 hunk；
+  - `dshGit/turnOf`（messageId→回合）、`dshGit/recentTurns`（readSurface lastSeq 窗口，面板「最近修改回合」）。
+- client（src/client.js）：
+  - 面板（shell.overlay）含「最近修改回合」兜底列表（已验证显示）；
+  - **keyed 替换** `conversation.chat.node` 的 `turn-tail` 键（声明 children 保留子座位），`TurnNodeSummary`：有变更→蓝标总结卡（逐 hunk 展开）；无变更→精简尾行 `turn N · 本回合无文件变更`；
+  - 面板头 `BUILD_TS` 秒级戳 + 「最近修改回合 · seen=…」探针（排查缓存与节点调用）。
+- 构建：`node scripts/build.mjs`；**⚠️ 每次改动必须重启 dsh 实例**（bundle URL rev 在启动时生成，仅刷新会命中浏览器缓存旧产物——多次"强刷无效果"的根因之一）。
+
+### 已根因定位并修复
+- **窗口默认区间 bug（"懒加载后一直无法显示"的主因）**：`turnDiff` 窗口化后，未传 `upToSeq` 时默认 `MAX_SAFE_INTEGER` → 窗口起点超出日志已存前缀 → `readFrom` 返回空 → files 恒 `[]` → 卡片永不渲染；面板因 `recentTurns` 另走了 `readSurface.lastSeq` 而未受影响。修复：turnDiff 回归全量缓存扫描（用户要求"改回无懒加载版本"后最终实现）。
+
+### 未解决 / 待新 agent 排查
+1. **内联卡（turn-tail 键）至今未在用户浏览器出现可见内容**；面板（同一数据源）始终正常。已排除：RPC 链路（信封直测全通）、数据（turnDiff 真返回 files+hunks）、注册（探针曾见 65/67 等被调用）、缓存（秒级戳可确认新产物）。
+2. **最大嫌疑**：`turn-tail` 尾区节点对"工具收尾型回合"（write/edit 后无收盘文本、`closing=null`）可能不存在——观测到 turn 66（演示改文件回合）无对应请求，而同区 65/67 有；官方自身回合尾（时间/词元行）在该类回合同样不显示。需浏览器侧确认（面板 `seen=` 对改文件回合是否出现）。
+3. keyed 替换是否真正接管官方 `turn-tail` 渲染器未确认（若注册冲突，面板会显示 `tail=err`）。
+4. 全部演示改文件（write/edit 工具调用）恰好都落在"工具收尾型"回合，导致时序上始终错过验证窗口；建议用"正常带收盘文本的编辑回合"验证，或接受面板兜底为准。
+
+### 排查速查（给接手的 agent）
+- 面板头戳应为 `08-23 12:28:01` 对应构建；「最近修改回合 · seen=…」列出被尾区调用过的回合号。
+- host 直测模板：POST `/api/dshGit/turnDiff` body `{"type":"client-request","rpcId":"p","method":"dshGit/turnDiff","payload":{"args":{"sessionId":"<SID>","turn":<N>}}}`。
+- 会话日志：`~/.dsh/sessions/--Users-strikingly-workspace-deepseek-harness-plugins-plugins-dsh-git--/session-73f52534-1263-47e5-b12f-f2cf063b314b/session.jsonl.zstd`（zstd -d -c）。
