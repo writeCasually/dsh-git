@@ -500,8 +500,8 @@ async function dispatch(ctx, method, args) {
     const turn = args.turn
     const cwd = await cwdOf(ctx, sessionId)
     const events = await sessionEvents(ctx, sessionId)
-    // Find all write/edit calls in this turn
-    const turnCalls = []
+    // Find all write/edit calls and their results in this turn
+    const turnOperations = []
     for (const ev of events) {
       if (ev.type !== 'tool/call') continue
       const p = ev.data !== undefined ? ev.data : ev
@@ -509,33 +509,58 @@ async function dispatch(ctx, method, args) {
       if (p.name !== 'write' && p.name !== 'edit') continue
       let parsed = null
       try { parsed = JSON.parse(p.arguments || '{}') } catch (_) {}
-      if (parsed) turnCalls.push({ name: p.name, args: parsed })
+      if (parsed) turnOperations.push({ name: p.name, args: parsed, callId: p.callId })
     }
-    if (turnCalls.length === 0) throw new Error(`no write/edit calls found in turn ${turn}`)
-    // Reverse the changes
+    if (turnOperations.length === 0) throw new Error(`no write/edit calls found in turn ${turn}`)
+    // Find the corresponding results to get meta.diffs (which contains oldText)
+    const resultsByCallId = new Map()
+    for (const ev of events) {
+      if (ev.type !== 'tool/result') continue
+      const p = ev.data !== undefined ? ev.data : ev
+      if (p.turn !== turn) continue
+      const callId = (p.message && p.message.source && p.message.source.callId) || p.callId
+      if (callId) resultsByCallId.set(callId, p.meta)
+    }
+    // Reverse the changes using meta.diffs.oldText
     const restored = []
     const errors = []
-    for (const call of turnCalls) {
-      const filePath = call.args.file_path
+    for (const op of turnOperations) {
+      const filePath = op.args.file_path
       if (!filePath) continue
+      const fullPath = require('node:path').resolve(cwd, filePath)
       try {
-        if (call.name === 'edit') {
-          // Reverse edit: replace new_string back to old_string
-          const fullPath = require('node:path').resolve(cwd, filePath)
-          const currentContent = await ctx.fs.readText(fullPath)
-          const oldString = call.args.old_string || ''
-          const newString = call.args.new_string || ''
-          if (currentContent.includes(newString)) {
-            const restoredContent = currentContent.replace(newString, oldString)
-            await ctx.fs.writeText(fullPath, restoredContent)
-            restored.push(filePath)
-          } else {
-            errors.push({ path: filePath, error: 'new_string not found in current file' })
+        // Get the meta.diffs from the result
+        const meta = resultsByCallId.get(op.callId)
+        const diffs = meta && Array.isArray(meta.diffs) ? meta.diffs : []
+        const fileDiff = diffs.find((d) => d.path === filePath)
+        if (fileDiff && fileDiff.oldText !== null && fileDiff.oldText !== undefined) {
+          // We have oldText from meta.diffs - restore it
+          await ctx.fs.writeText(fullPath, fileDiff.oldText)
+          restored.push(filePath)
+        } else if (fileDiff && fileDiff.oldText === null) {
+          // New file creation - delete the file
+          try {
+            await ctx.fs.remove(fullPath)
+            restored.push(filePath + ' (deleted)')
+          } catch {
+            errors.push({ path: filePath, error: 'new file cannot be deleted (file may not exist)' })
           }
-        } else if (call.name === 'write') {
-          // For writes, we can't easily restore without knowing the previous content
-          // Skip with a warning
-          errors.push({ path: filePath, error: 'write operations cannot be automatically restored' })
+        } else {
+          // No meta.diffs available, try to reverse from args
+          if (op.name === 'edit') {
+            const currentContent = await ctx.fs.readText(fullPath)
+            const oldString = op.args.old_string || ''
+            const newString = op.args.new_string || ''
+            if (currentContent.includes(newString)) {
+              const restoredContent = currentContent.replace(newString, oldString)
+              await ctx.fs.writeText(fullPath, restoredContent)
+              restored.push(filePath)
+            } else {
+              errors.push({ path: filePath, error: 'new_string not found in current file' })
+            }
+          } else {
+            errors.push({ path: filePath, error: 'cannot restore write operation (no oldText in meta)' })
+          }
         }
       } catch (e) {
         errors.push({ path: filePath, error: String(e.message || e) })
