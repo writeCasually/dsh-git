@@ -1,13 +1,13 @@
 /**
  * dsh-git host half: one Connection RPC interceptor over /api that exposes
- * status/diff/commit/readFile/turnDiff without requiring a compile-time
- * api-remotes contribution. This keeps the bundle installable by
+ * status/diff/commit/readFile/turnDiff/ledger/restore without requiring a
+ * compile-time api-remotes contribution. This keeps the bundle installable by
  * `dsh plugin add` while a Remote namespace would force the host into the
  * harness source tree.
  * @module dsh-git
  */
 
-export const inject = ['connection', 'subprocess', 'sessionQuery', 'fs', 'sessionPersistence']
+export const inject = ['connection', 'subprocess', 'sessionQuery', 'fs', 'sessionPersistence', 'agents']
 
 const ENDPOINT_PREFIX = 'dshGit/'
 const ENDPOINT_PATTERN = /^dshGit\/[A-Za-z0-9_]+$/
@@ -179,6 +179,199 @@ function scanTurns(events, maxTurns) {
   return maxTurns > 0 ? summaries.slice(-maxTurns) : summaries
 }
 
+// ─── P2: Ledger & Checkpoints ───────────────────────────────────────────────
+
+/**
+ * Build a version ledger from session events. Each turn with file changes
+ * becomes a version entry. The ledger is append-only and rebuildable.
+ * @param {object} ctx - Host context
+ * @param {string} sessionId - Session ID
+ * @returns {Promise<Array>} Ledger entries
+ */
+async function buildLedger(ctx, sessionId) {
+  const events = await sessionEvents(ctx, sessionId)
+  const turnSummaries = scanTurns(events, 0)
+  const ledger = []
+  let version = 0
+  for (const summary of turnSummaries) {
+    if (summary.files.length === 0) continue
+    version++
+    const totalAdd = summary.files.reduce((sum, f) => sum + f.add, 0)
+    const totalDel = summary.files.reduce((sum, f) => sum + f.del, 0)
+    ledger.push({
+      version,
+      turn: summary.turn,
+      files: summary.files.map((f) => f.path),
+      add: totalAdd,
+      del: totalDel,
+      fileCount: summary.files.length,
+      type: 'turn',
+    })
+  }
+  return ledger
+}
+
+/**
+ * Get the checkpoint ref name for a version.
+ * @param {string} sessionId - Session ID (sanitized for ref name)
+ * @param {number} version - Version number
+ * @returns {string} Git ref name
+ */
+function checkpointRef(sessionId, version) {
+  // Sanitize session ID for use in ref name
+  const safe = sessionId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 40)
+  return `refs/dsh-git/ckpt/${safe}/V${version}`
+}
+
+/**
+ * Create a checkpoint (snapshot) of the entire working tree.
+ * Stores as a detached git commit under a private ref.
+ * @param {object} ctx - Host context
+ * @param {string} cwd - Working directory
+ * @param {string} sessionId - Session ID
+ * @param {number} version - Version number
+ * @returns {Promise<{ref: string, tree: string}>}
+ */
+async function createCheckpoint(ctx, cwd, sessionId, version) {
+  const ref = checkpointRef(sessionId, version)
+  // Stage everything (including untracked)
+  await runGit(ctx, cwd, ['add', '-A'])
+  // Create a tree object from the index
+  const treeOut = await runGit(ctx, cwd, ['write-tree'])
+  const tree = treeOut.trim()
+  // Create a commit object (detached, no parent)
+  const commitOut = await runGit(ctx, cwd, [
+    'commit-tree', tree, '-m', `dsh-git checkpoint V${version} (session ${sessionId})`,
+  ])
+  const commit = commitOut.trim()
+  // Update the ref to point to this commit
+  await runGit(ctx, cwd, ['update-ref', ref, commit])
+  return { ref, tree }
+}
+
+/**
+ * List existing checkpoints for a session.
+ * @param {object} ctx - Host context
+ * @param {string} cwd - Working directory
+ * @param {string} sessionId - Session ID
+ * @returns {Promise<Array<{version: number, ref: string, commit: string}>>}
+ */
+async function listCheckpoints(ctx, cwd, sessionId) {
+  const safe = sessionId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 40)
+  const prefix = `refs/dsh-git/ckpt/${safe}/`
+  let out = ''
+  try {
+    out = await runGit(ctx, cwd, ['for-each-ref', '--format=%(refname) %(objectname:short)', prefix])
+  } catch {
+    // No refs exist yet
+    return []
+  }
+  const results = []
+  for (const line of out.split('\n').filter(Boolean)) {
+    const [ref, commit] = line.split(' ')
+    const match = ref.match(/V(\d+)$/)
+    if (match) {
+      results.push({ version: Number.parseInt(match[1], 10), ref, commit })
+    }
+  }
+  results.sort((a, b) => a.version - b.version)
+  return results
+}
+
+/**
+ * Restore working tree to a checkpoint version.
+ * Uses git checkout of the tree object, preserving the index.
+ * @param {object} ctx - Host context
+ * @param {string} cwd - Working directory
+ * @param {string} sessionId - Session ID
+ * @param {number} version - Target version
+ * @param {string[]} [files] - Specific files to restore (null = all)
+ * @returns {Promise<{restored: string[], ref: string}>}
+ */
+async function restoreCheckpoint(ctx, cwd, sessionId, version, files) {
+  const ref = checkpointRef(sessionId, version)
+  // Verify the ref exists
+  let commitHash
+  try {
+    commitHash = (await runGit(ctx, cwd, ['rev-parse', ref])).trim()
+  } catch {
+    throw new Error(`checkpoint V${version} not found`)
+  }
+  // Get the tree from the commit
+  const tree = (await runGit(ctx, cwd, ['rev-parse', `${commitHash}^{tree}`])).trim()
+
+  if (files && files.length > 0) {
+    // Restore specific files from the tree
+    for (const file of files) {
+      try {
+        await runGit(ctx, cwd, ['checkout', tree, '--', file])
+      } catch (e) {
+        // File might not exist in the checkpoint (new file since checkpoint)
+        // In that case, remove it
+        try {
+          await runGit(ctx, cwd, ['rm', '--cached', file])
+        } catch { /* ignore */ }
+      }
+    }
+    return { restored: files, ref }
+  }
+  // Restore entire working tree
+  // First, clean the working tree
+  await runGit(ctx, cwd, ['checkout', tree, '--', '.'])
+  // Remove files that exist in working tree but not in checkpoint
+  const statusOut = await runGit(ctx, cwd, ['status', '--porcelain=v1'])
+  const toRemove = []
+  for (const line of statusOut.split('\n').filter(Boolean)) {
+    if (line.startsWith('??')) {
+      // Untracked file - check if it existed in checkpoint
+      const path = line.slice(3)
+      try {
+        await runGit(ctx, cwd, ['ls-tree', tree, path])
+        // File exists in checkpoint, keep it
+      } catch {
+        // File doesn't exist in checkpoint, remove it
+        toRemove.push(path)
+      }
+    }
+  }
+  // Note: we don't auto-remove untracked files for safety
+  // The user can manually clean them
+  return { restored: ['*'], ref }
+}
+
+/**
+ * Compute diff between current working tree and a checkpoint.
+ * @param {object} ctx - Host context
+ * @param {string} cwd - Working directory
+ * @param {string} sessionId - Session ID
+ * @param {number} version - Target version
+ * @returns {Promise<{diff: string, files: Array}>}
+ */
+async function previewRestore(ctx, cwd, sessionId, version) {
+  const ref = checkpointRef(sessionId, version)
+  let commitHash
+  try {
+    commitHash = (await runGit(ctx, cwd, ['rev-parse', ref])).trim()
+  } catch {
+    throw new Error(`checkpoint V${version} not found`)
+  }
+  const tree = (await runGit(ctx, cwd, ['rev-parse', `${commitHash}^{tree}`])).trim()
+  // Diff current index against the checkpoint tree
+  const diff = await runGit(ctx, cwd, ['diff', '--no-color', tree])
+  // Get numstat for file-level summary
+  const numstat = await runGit(ctx, cwd, ['diff', '--numstat', tree])
+  const files = []
+  for (const line of numstat.split('\n').filter(Boolean)) {
+    const [add, del, path] = line.split('\t')
+    files.push({
+      path,
+      add: add === '-' ? 0 : Number.parseInt(add, 10) || 0,
+      del: del === '-' ? 0 : Number.parseInt(del, 10) || 0,
+    })
+  }
+  return { diff, files }
+}
+
 async function dispatch(ctx, method, args) {
   if (method === 'status') {
     const cwd = await cwdOf(ctx, args.sessionId)
@@ -245,13 +438,130 @@ async function dispatch(ctx, method, args) {
       : { events: (await ctx.sessionQuery.readSession(args.sessionId)).events }
     return { turns: scanTurns(snap.events || [], limit) }
   }
+  // ─── P2: Ledger & Restore ─────────────────────────────────────────────────
+  if (method === 'ledger.list') {
+    const ledger = await buildLedger(ctx, args.sessionId)
+    const cwd = await cwdOf(ctx, args.sessionId)
+    const checkpoints = await listCheckpoints(ctx, cwd, args.sessionId)
+    // Merge checkpoint info into ledger entries
+    const checkpointVersions = new Set(checkpoints.map((c) => c.version))
+    const entries = ledger.map((entry) => ({
+      ...entry,
+      hasCheckpoint: checkpointVersions.has(entry.version),
+    }))
+    return { entries }
+  }
+  if (method === 'ledger.preview') {
+    if (typeof args.version !== 'number') throw new Error('version required')
+    const cwd = await cwdOf(ctx, args.sessionId)
+    return await previewRestore(ctx, cwd, args.sessionId, args.version)
+  }
+  if (method === 'ledger.checkpoint') {
+    // Create a checkpoint for a specific version (or the latest)
+    const ledger = await buildLedger(ctx, args.sessionId)
+    if (ledger.length === 0) throw new Error('no versions to checkpoint')
+    const version = typeof args.version === 'number' ? args.version : ledger[ledger.length - 1].version
+    const cwd = await cwdOf(ctx, args.sessionId)
+    const result = await createCheckpoint(ctx, cwd, args.sessionId, version)
+    return { version, ...result }
+  }
+  if (method === 'ledger.restore') {
+    if (typeof args.version !== 'number') throw new Error('version required')
+    const cwd = await cwdOf(ctx, args.sessionId)
+    const files = Array.isArray(args.files) ? args.files : undefined
+    const result = await restoreCheckpoint(ctx, cwd, args.sessionId, args.version, files)
+    // Append a restore entry to the ledger
+    const ledger = await buildLedger(ctx, args.sessionId)
+    const maxVersion = ledger.length > 0 ? ledger[ledger.length - 1].version : 0
+    const restoreEntry = {
+      version: maxVersion + 1,
+      turn: null,
+      files: result.restored,
+      add: 0,
+      del: 0,
+      fileCount: result.restored.length,
+      type: 'restore',
+      targetVersion: args.version,
+    }
+    return { result, restoreEntry }
+  }
+  if (method === 'agent.status') {
+    // Check if agent is running (for mutex)
+    try {
+      const surface = await ctx.sessionQuery.readSurface(args.sessionId)
+      return { running: surface ? surface.running === true : false }
+    } catch {
+      return { running: false }
+    }
+  }
+  if (method === 'restoreTurn') {
+    if (typeof args.turn !== 'number') throw new Error('turn required')
+    const sessionId = args.sessionId
+    const turn = args.turn
+    const cwd = await cwdOf(ctx, sessionId)
+    const events = await sessionEvents(ctx, sessionId)
+    // Find all write/edit calls in this turn
+    const turnCalls = []
+    for (const ev of events) {
+      if (ev.type !== 'tool/call') continue
+      const p = ev.data !== undefined ? ev.data : ev
+      if (p.turn !== turn) continue
+      if (p.name !== 'write' && p.name !== 'edit') continue
+      let parsed = null
+      try { parsed = JSON.parse(p.arguments || '{}') } catch (_) {}
+      if (parsed) turnCalls.push({ name: p.name, args: parsed })
+    }
+    if (turnCalls.length === 0) throw new Error(`no write/edit calls found in turn ${turn}`)
+    // Reverse the changes
+    const restored = []
+    const errors = []
+    for (const call of turnCalls) {
+      const filePath = call.args.file_path
+      if (!filePath) continue
+      try {
+        if (call.name === 'edit') {
+          // Reverse edit: replace new_string back to old_string
+          const fullPath = require('node:path').resolve(cwd, filePath)
+          const currentContent = await ctx.fs.readText(fullPath)
+          const oldString = call.args.old_string || ''
+          const newString = call.args.new_string || ''
+          if (currentContent.includes(newString)) {
+            const restoredContent = currentContent.replace(newString, oldString)
+            await ctx.fs.writeText(fullPath, restoredContent)
+            restored.push(filePath)
+          } else {
+            errors.push({ path: filePath, error: 'new_string not found in current file' })
+          }
+        } else if (call.name === 'write') {
+          // For writes, we can't easily restore without knowing the previous content
+          // Skip with a warning
+          errors.push({ path: filePath, error: 'write operations cannot be automatically restored' })
+        }
+      } catch (e) {
+        errors.push({ path: filePath, error: String(e.message || e) })
+      }
+    }
+    // Write-back: inject a message into the session so the agent knows about the restore
+    try {
+      const agent = ctx.agents.get(sessionId)
+      if (agent) {
+        const fileList = restored.join(', ')
+        const errorList = errors.length > 0 ? `，${errors.length} 个文件恢复失败` : ''
+        const message = `用户撤销了 turn ${turn} 的代码修改，恢复了 ${restored.length} 个文件${errorList}：${fileList}。请知晓当前工作区已变更。`
+        agent.followup({ role: 'user', content: [{ type: 'text', text: message }] })
+      }
+    } catch (e) {
+      // followup 失败不影响恢复结果
+      errors.push({ path: '__followup__', error: `write-back failed: ${e.message}` })
+    }
+    return { restored, errors, turn }
+  }
   throw new Error(`unknown dsh-git method ${method}`)
 }
 
 export function apply(ctx) {
-  const remove = ctx.connection.rpc.intercept(
-    '/api',
-    (endpoint) => ENDPOINT_PATTERN.test(endpoint),
+  const remove = ctx.connection.rpc.handle(
+    '/dsh-git',
     async (endpoint, payload) => {
       try {
         const args = plainArgs(payload)
@@ -268,7 +578,6 @@ export function apply(ctx) {
         }
       }
     },
-    { authority: 'trusted-host' },
   )
   ctx.effect(() => remove, 'dsh-git host rpc')
 }

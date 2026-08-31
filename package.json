@@ -16,6 +16,7 @@
   ],
   "scripts": {
     "build": "node scripts/build.mjs",
+    "dev": "node scripts/watch.mjs",
     "prepare": "node scripts/build.mjs",
     "prepack": "node scripts/build.mjs"
   },
@@ -29,7 +30,6 @@
     "client": {
       "inject": [
         "@deepseek-ai/dsh-client-connection",
-        "@deepseek-ai/dsh-client-runtime",
         "@deepseek-ai/dsh-client-ui-conversation",
         "@deepseek-ai/dsh-client-ui-layout"
       ],

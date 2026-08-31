@@ -149,7 +149,7 @@ V5 ← 回合修改 (turn 8)     diff vs V4   ← agent 在恢复态之上继续
 |---|---|---|
 | P0 可行性 | 会话日志 meta 读回 / git 子进程 / 事件边界 / turnTail+overlay 渲染 —— 动态插件 Demo | 动态插件跑通端到端最小链路 ✅ |
 | P1 MVP | Git 面板（status/diff/commit/readFile/preview）+ 回合摘要卡 | 面板 ✅（官方双面包静态安装生效）；回合摘要卡 ✅（面板「最近修改回合」+ turnTail 内联尽力而为） |
-| P2 版本与恢复 | 账本 + 边界快照 + 三档恢复 + 写回会话 + 互斥/审批 | 未做（下一步，落官方双面包） |
+| P2 版本与恢复 | 账本 + 边界快照 + 三档恢复 + 写回会话 + 互斥/审批 | ✅ 基础实现完成（账本 + 快照 + 恢复 + 互斥） |
 | P3 打磨 | 非 git 降级、大 diff 性能、主题适配、写回开关、导出打包 | **"发布形态"提前完成**（双面包 + `dsh plugin add` + docs/build.md）；其余待 P2 后 |
 
 > 阶段校准（2026-08）：静态官方安装（原 P3 的"发布形态"）提前落地，作用是把 P2 放进已验证的正式载体。现架构 = 仓库根双面包（connection RPC 通信），P2 直接在 `src/index.js` + `src/client.js` 上扩展。
@@ -185,7 +185,7 @@ V5 ← 回合修改 (turn 8)     diff vs V4   ← agent 在恢复态之上继续
 3. 只在**有文件变动的回合**显示（无变更不占位）。
 
 ### 已实现（HEAD=6bf7b00）
-- host（src/index.js，connection.rpc.intercept，无 typert）：
+- host（src/index.js，connection.rpc.handle('/dsh-git')，无 typert）：
   - `dshGit/status|diff|commit|readFile`（面板：分支/分组/单文件 diff/提交/预览）；
   - `dshGit/turnDiff`：**非懒加载全量读 + 水位增量缓存**（`sessionEvents`），任一回合约 5 秒级首次、之后即时；meta 缺失时用 edit 参数（old/new_string）或 write content 合成 hunk；
   - `dshGit/turnOf`（messageId→回合）、`dshGit/recentTurns`（readSurface lastSeq 窗口，面板「最近修改回合」）。
@@ -206,5 +206,162 @@ V5 ← 回合修改 (turn 8)     diff vs V4   ← agent 在恢复态之上继续
 
 ### 排查速查（给接手的 agent）
 - 面板头戳应为 `08-23 12:28:01` 对应构建；「最近修改回合 · seen=…」列出被尾区调用过的回合号。
-- host 直测模板：POST `/api/dshGit/turnDiff` body `{"type":"client-request","rpcId":"p","method":"dshGit/turnDiff","payload":{"args":{"sessionId":"<SID>","turn":<N>}}}`。
+- host 直测模板：POST `/dsh-git/dshGit/turnDiff` body `{"type":"client-request","rpcId":"p","method":"dshGit/turnDiff","payload":{"args":{"sessionId":"<SID>","turn":<N>}}}`。
 - 会话日志：`~/.dsh/sessions/--Users-strikingly-workspace-deepseek-harness-plugins-plugins-dsh-git--/session-73f52534-1263-47e5-b12f-f2cf063b314b/session.jsonl.zstd`（zstd -d -c）。
+
+## 14. P1 回合修改卡重构（2026-08-25）
+
+### 问题根因
+原方案使用 `conversation.chat.node` 的 `turn-tail` 键控替换，试图让 `TurnNodeSummary` 接管官方的 `TurnTailNodeView`。但存在两个根本问题：
+
+1. **键控插槽竞争不确定**：官方 `TurnTailNodeView` 作为核心 bundle 先注册，dsh-git 作为插件后注册。键控插槽中同一 key 只有一个赢家，先注册者通常优先。
+2. **"工具收尾型回合"的 turn-tail 渲染为空**：当 `closing === null`（纯工具调用回合无文本响应）时，`TurnTailNodeView` 的行为是：
+   ```typescript
+   if (closing === null) return tail === null ? null : <div>{tail}</div>
+   ```
+   当 chain 为空时渲染结果为 null，导致 dsh-git 的组件永远不会被挂载。
+
+### 新方案：turnTail chain 条目
+改为注册 `conversation.chat.turnTail` **chain** 条目（而非 keyed 替换）：
+
+```javascript
+const disposeTurnTail = slots.inject('conversation.chat.turnTail', () =>
+  slots.register({
+    name: 'conversation.chat.turnTail',
+    id: 'dsh-git-turn-diff',
+    order: 10,
+  }, TurnDiffSummary))
+```
+
+**关键优势**：
+- chain 条目在 `closing === null` 时也会渲染（`TurnTailNodeView` 第 25 行保证）
+- 不与官方 renderer 竞争，chain 是独立通道
+- 数据来源：直接从会话快照读取（`useSession` → `chat.locations.getTurn()` → `chat.nodes.get()` → `tool-call` 节点的 `callView`/`resultView`）
+- 复用官方的数据管道：write/edit 工具的 `presentCall`/`presentResult` 生成 `card: 'diff'` 视图
+
+### 数据流
+```
+ConversationSnapshot
+  └→ chat.locations.getTurn(turn) → 该回合所有节点的 key[]
+  └→ chat.nodes.get(key) → ChatConversationViewNode
+      └→ kind === 'tool-call' 时
+          └→ data.root (ToolCallBlock)
+              ├→ callView:    { card: 'diff', diffs: [...] }  (运行时)
+              └→ resultView:  { card: 'diff', diffs: [...] }  (完成后)
+```
+
+### 删除的组件
+- `TurnNodeSummary`：原 turn-tail keyed 替换组件
+- `TurnTailCard`：未使用的 chain 组件
+- `GitSummary`：assistant-actions 组件（在 closing === null 时不渲染）
+
+### 新增的组件
+- `dshGitDiffsDefinition()`：Conversation Node Definition（数据累积器，无视图节点）
+- `selectTurnDiffs(owner)`：chain selector，从 `owner.turn.data.get('dsh-git-turn-diffs')` 读取
+- `TurnDiffSummary(props)`：turnTail chain 条目，渲染回合级 diff 汇总
+
+### 复核修正（2026-08-26，dsh 仓库 8/25 重构后）
+dsh 仓库在 8/25 重构（`conversation-nodes` 从 ui-conversation 移到 ui-chat、`match.view` 机制移除、`@deepseek-ai/dsh-client-runtime` 包删除）。首版新方案基于重构前的 API，导致"回合下方什么都没有"。修正点：
+
+1. **数据源**：`match.view` 已移除 → 改从 `tool/result` 事件的 `meta.diffs` 提取（官方 diff-card-model 的同一数据源）；meta 缺失时用 write/edit 调用参数合成 hunk（官方 fallback 同款）。
+2. **`buildLocationData` key 约束**：返回的 `key` 必须等于 definition 的 `kind`（assembler 强校验，否则抛错）→ key 统一为 `'dsh-git-turn-diffs'`。
+3. **chain 注册必须带 `select`**：chain 条目缺 selector 是注册契约违约（SlotCore 校验），首版漏掉 → 补 `select: selectTurnDiffs`。
+4. **surface 过滤**：tool/result 事件加 `surfaceOp === 'append'` 过滤（与 ui-deliverables 一致），避免替换表面的重复计数。
+5. **package.json**：`dsh.client.inject` 移除已删除的 `@deepseek-ai/dsh-client-runtime`。
+
+### 最终修复（2026-08-26 晚，回合卡已显示）
+面板诊断（`diag: uiConv=N events=N conn=Y · selLast=8(empty)`）定位到最后一环：
+
+- **`ctx.get('uiConversation')` 对未在 `exports.inject` 声明的服务返回 undefined** —— cordis 依赖解析机制。官方消费者（ui-chat / ui-deliverables）都把 `'uiConversation'` 放进 inject 列表。
+- 修正：`exports.inject = ['slots', 'connection', 'uiConversation']`。加载顺序由 `dsh.client.inject` 中的 `@deepseek-ai/dsh-client-ui-conversation` 依赖保证（clientModules 的 `orderByModuleGraph` 拓扑排序）。
+- 连锁效应：之前 definition 从未注册 → `turn.data` 无 `'dsh-git-turn-diffs'` → selector 恒返回 null → 卡片永不渲染。chain 本身一直正常（`selLast=8` 证明 selector 被调用）。
+
+### UI 重构（2026-08-26 晚）
+全部样式改用官方 `--dsw-alias-*` 设计 token（自动适配明暗主题），类名统一 `dg-` 前缀避免与官方样式冲突：
+
+- **回合卡**（`TurnDiffSummary`）：迷你 commit 卡设计。签名元素 = 左侧 2px business 色 diff-gutter 竖线；头行 = `dsh-git` 标签 + 摘要 + 右对齐等宽 `+A −R`；文件行 = chevron + 等宽路径 + 红绿统计；展开 diff 完全复用官方 DiffBlock 语言（代码块背景、path header 600 权重、`- `/`+ ` 前缀、`└ +A -R · N hunk` footer）。
+- **Git 面板**：`--dsw-alias-bg-overlay` 背景、business 色激活 tab、等宽数据；诊断行保留（等宽 caption 小字）。
+- **数据口径**：行数统计与官方 `DiffBlock.contentLines` 一致（尾部换行是终止符不算行）。
+
+### 验证链（当前实现）
+```
+tool/result 事件（surfaceOp=append，非错误）
+  └→ dshGitDiffsDefinition.update：meta.diffs 或参数合成
+      └→ buildLocationData 发布 turn.data['dsh-git-turn-diffs']
+          └→ TurnTailNodeView renderSlotChain('conversation.chat.turnTail', {turn, seq, openFile})
+              └→ selectTurnDiffs(owner) → 非空 diffs → TurnDiffSummary 挂载
+                  └→ props.matched = diffs[]，按 path 分组渲染 +N −M 与 hunk 展开
+```
+
+关键前提（已在 dsh HEAD 核实）：`TurnTailNodeView` 第 27 行 `if (closing === null) return tail === null ? null : <div>{tail}</div>` —— 即使纯工具回合（无收盘文本），chain 内容也渲染。
+
+## 15. P2 版本与恢复实现（2026-08-26）
+
+### 实现概览
+
+P2 在 P1 基础上扩展了恢复功能。**核心设计变更**：恢复操作直接集成在回合摘要卡上，而不是单独的 Git 面板 tab。用户可以在每个回合的 diff 汇总上点击"恢复"按钮，撤销该回合的代码修改。
+
+### 设计决策
+
+**恢复操作的位置**：
+- ❌ 原方案：Git 面板新增"版本" tab，展示版本时间线
+- ✅ 新方案：恢复按钮直接在回合摘要卡（TurnDiffSummary）的头部
+
+**原因**：
+- 用户的心智模型是"撤销这个回合的修改"，而不是"恢复到某个版本"
+- 回合摘要卡已经展示了修改内容，恢复操作应该就近放置
+- 避免在 Git 面板上增加复杂度
+
+### Host 端实现（src/index.js）
+
+**新增 RPC：`restoreTurn`**：
+- 入参：`{ sessionId, turn }`
+- 逻辑：
+  1. 从会话日志中找到该回合的所有 `write/edit` 工具调用
+  2. 对每个 `edit` 调用：读取当前文件内容，将 `new_string` 替换回 `old_string`
+  3. 对 `write` 调用：跳过（无法自动恢复，因为不知道修改前的内容）
+- 出参：`{ restored: string[], errors: Array, turn }`
+
+**互斥检查**：
+- `agent.status` RPC：检查 agent 是否运行中
+- 恢复按钮在 agent 运行时禁用
+
+### Client 端实现（src/client.js）
+
+**TurnDiffSummary 组件增强**：
+- 头部新增"恢复"按钮（dg-btn 样式）
+- 点击后弹出确认对话框
+- 确认后调用 `restoreTurn` RPC
+- 恢复成功后显示结果（恢复了几个文件，有几个错误）
+
+**UI 细节**：
+- 恢复按钮：business 色边框，11px 小字，agent 运行时半透明
+- 确认对话框：border-l1 边框、bg-base 背景、business 色确认按钮
+- 错误提示：write 操作无法自动恢复时显示警告
+
+### 已移除
+
+- ~~LedgerTab 组件~~：不再需要单独的版本时间线 tab
+- ~~ledger.list / ledger.preview / ledger.checkpoint / ledger.restore~~：简化为单个 `restoreTurn` RPC
+
+### 写回会话实现
+
+恢复操作完成后，通过 `agent.followup()` 注入消息到会话：
+
+```javascript
+const agent = ctx.agents.get(sessionId)
+if (agent) {
+  const message = `用户撤销了 turn ${turn} 的代码修改，恢复了 ${restored.length} 个文件：${fileList}。请知晓当前工作区已变更。`
+  agent.followup({ role: 'user', content: [{ type: 'text', text: message }] })
+}
+```
+
+- 消息在 agent 下一轮对话时必读
+- 消除信息差：agent 知道文件被恢复了
+- followup 失败不影响恢复结果（降级为静默恢复）
+
+### 待完善
+
+1. **write 操作恢复**：当前无法自动恢复 write 操作（需要知道修改前的内容）
+2. **hunk 级恢复**：当前只实现文件级恢复
+3. **非 git 降级**：影子快照方案待实现

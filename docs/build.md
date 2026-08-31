@@ -24,14 +24,14 @@ dsh-git/                      # 仓库根 = 双面包插件包（包名 dsh-git�
 │     scripts: { build/prepare/prepack: node scripts/build.mjs }
 ├── cordis.patch.yml          # - insert: [- id: dsh-git, name: 'dsh-git']（一行）
 ├── src/index.js              # 宿主：const connection / subprocess / sessionQuery / fs
-│                              #   ctx.connection.rpc.intercept('/api', …) 暴露 dshGit/*
+│                              #   ctx.connection.rpc.handle('/dsh-git', …) 暴露 dshGit/*
 ├── src/client.js             # 浏览器：factory(require) 闭包内注册 slots + connection.rpc.call
 ├── scripts/build.mjs         # ~25 行：拷 src/index.js→lib/index.js；
 │                              #   src/client.js 包成 window.__ModuleLoader__.load({id, factory})
 └── lib/                      # 构建产物（提交与否均可；prepare 自动生成）
 ```
 
-- **RPC**：宿主用 `ctx.connection.rpc.intercept('/api', predicate, handler, {authority})`，客户端 `connection.rpc.call('/api', 'dshGit/status', {args})` → `{ok, value}`。零代码生成。
+- **RPC**：宿主用 `ctx.connection.rpc.handle('/dsh-git', handler)`，客户端 `connection.rpc.call('/dsh-git', 'dshGit/status', {args})` → `{ok, value}`。零代码生成。`/api` 的 shared interceptor 由 `dsh-api-gateway` 独占，插件必须走独立 channel，否则会抢占 gateway 并让标准 API 全部 404。
 - **安装**：`dsh plugin --profile web add <repo>`（本地 `add .` 可 self-link）→ 自动并入 `dsh.profile.bundles`；重启生效。
 - **client 产物契约**：`lib/client.js` 必须是
   ```js
