@@ -303,7 +303,7 @@ function TurnDiffSummary(props) {
   }
   const plural = files.length > 1 ? '个文件' : '个文件'
 
-  // Restore this turn's changes
+  // Restore to this turn (revert all changes from this turn onwards)
   const doRestore = () => {
     if (!state.sessionId || !turnNumber || agentRunning) return
     setRestoring(true)
@@ -311,7 +311,8 @@ function TurnDiffSummary(props) {
       .then((r) => {
         setRestoring(false)
         setConfirmRestore(false)
-        alert(`已撤销 turn ${turnNumber} 的修改，恢复了 ${r.restored.length} 个文件`)
+        const turnsReverted = r.turnsReverted || [turnNumber]
+        alert(`已恢复到 turn ${turnNumber} 之前的状态，撤销了 ${turnsReverted.length} 个回合的修改，恢复了 ${r.restored.length} 个文件`)
       })
       .catch((e) => {
         setRestoring(false)
@@ -335,8 +336,8 @@ function TurnDiffSummary(props) {
         style: { marginLeft: 8, fontSize: 11, padding: '2px 8px', opacity: agentRunning ? 0.5 : 1 },
         disabled: agentRunning || restoring,
         onClick: (e) => { e.stopPropagation(); setConfirmRestore(true) },
-        title: agentRunning ? 'agent 运行中，恢复已禁用' : '撤销本回合修改',
-      }, restoring ? '恢复中…' : '恢复'),
+        title: agentRunning ? 'agent 运行中，恢复已禁用' : '恢复到此回合之前的状态（撤销此回合及之后的所有修改）',
+      }, restoring ? '恢复中…' : '恢复到此'),
     ),
     // Confirm restore dialog
     confirmRestore
@@ -350,13 +351,13 @@ function TurnDiffSummary(props) {
           },
         },
           React.createElement('div', { className: 'dg-muted', style: { marginBottom: 6 } },
-            `确认撤销 turn ${turnNumber} 的修改？将恢复 ${files.length} 个文件到修改前的状态。`),
+            `确认恢复到 turn ${turnNumber} 之前的状态？将撤销此回合及之后的所有修改。`),
           React.createElement('div', { className: 'dg-btn-row' },
             React.createElement('button', {
               className: 'dg-btn dg-btn-active',
               disabled: restoring,
               onClick: doRestore,
-            }, restoring ? '恢复中…' : '确认撤销'),
+            }, restoring ? '恢复中…' : '确认恢复'),
             React.createElement('button', {
               className: 'dg-btn',
               onClick: () => setConfirmRestore(false),

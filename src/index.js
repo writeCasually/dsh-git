@@ -497,88 +497,103 @@ async function dispatch(ctx, method, args) {
   if (method === 'restoreTurn') {
     if (typeof args.turn !== 'number') throw new Error('turn required')
     const sessionId = args.sessionId
-    const turn = args.turn
+    const targetTurn = args.turn
     const cwd = await cwdOf(ctx, sessionId)
     const events = await sessionEvents(ctx, sessionId)
-    // Find all write/edit calls and their results in this turn
-    const turnOperations = []
+    // Build a map of all turns with file changes
+    const turnsWithChanges = new Map() // turn -> { operations, resultsByCallId }
     for (const ev of events) {
       if (ev.type !== 'tool/call') continue
       const p = ev.data !== undefined ? ev.data : ev
-      if (p.turn !== turn) continue
+      if (typeof p.turn !== 'number') continue
       if (p.name !== 'write' && p.name !== 'edit') continue
       let parsed = null
       try { parsed = JSON.parse(p.arguments || '{}') } catch (_) {}
-      if (parsed) turnOperations.push({ name: p.name, args: parsed, callId: p.callId })
+      if (!parsed) continue
+      if (!turnsWithChanges.has(p.turn)) {
+        turnsWithChanges.set(p.turn, { operations: [], resultsByCallId: new Map() })
+      }
+      turnsWithChanges.get(p.turn).operations.push({ name: p.name, args: parsed, callId: p.callId })
     }
-    if (turnOperations.length === 0) throw new Error(`no write/edit calls found in turn ${turn}`)
-    // Find the corresponding results to get meta.diffs (which contains oldText)
-    const resultsByCallId = new Map()
+    // Collect results for each turn
     for (const ev of events) {
       if (ev.type !== 'tool/result') continue
       const p = ev.data !== undefined ? ev.data : ev
-      if (p.turn !== turn) continue
+      if (typeof p.turn !== 'number') continue
+      const turnData = turnsWithChanges.get(p.turn)
+      if (!turnData) continue
       const callId = (p.message && p.message.source && p.message.source.callId) || p.callId
-      if (callId) resultsByCallId.set(callId, p.meta)
+      if (callId) turnData.resultsByCallId.set(callId, p.meta)
     }
-    // Reverse the changes using meta.diffs.oldText
-    const restored = []
-    const errors = []
-    for (const op of turnOperations) {
-      const filePath = op.args.file_path
-      if (!filePath) continue
-      const fullPath = require('node:path').resolve(cwd, filePath)
-      try {
-        // Get the meta.diffs from the result
-        const meta = resultsByCallId.get(op.callId)
-        const diffs = meta && Array.isArray(meta.diffs) ? meta.diffs : []
-        const fileDiff = diffs.find((d) => d.path === filePath)
-        if (fileDiff && fileDiff.oldText !== null && fileDiff.oldText !== undefined) {
-          // We have oldText from meta.diffs - restore it
-          await ctx.fs.writeText(fullPath, fileDiff.oldText)
-          restored.push(filePath)
-        } else if (fileDiff && fileDiff.oldText === null) {
-          // New file creation - delete the file
-          try {
-            await ctx.fs.remove(fullPath)
-            restored.push(filePath + ' (deleted)')
-          } catch {
-            errors.push({ path: filePath, error: 'new file cannot be deleted (file may not exist)' })
-          }
-        } else {
-          // No meta.diffs available, try to reverse from args
-          if (op.name === 'edit') {
-            const currentContent = await ctx.fs.readText(fullPath)
-            const oldString = op.args.old_string || ''
-            const newString = op.args.new_string || ''
-            if (currentContent.includes(newString)) {
-              const restoredContent = currentContent.replace(newString, oldString)
-              await ctx.fs.writeText(fullPath, restoredContent)
-              restored.push(filePath)
-            } else {
-              errors.push({ path: filePath, error: 'new_string not found in current file' })
+    // Find all turns >= targetTurn that have changes (these need to be reverted)
+    const turnsToRevert = []
+    for (const [turn, data] of turnsWithChanges) {
+      if (turn >= targetTurn) turnsToRevert.push({ turn, ...data })
+    }
+    // Sort by turn descending (revert latest first)
+    turnsToRevert.sort((a, b) => b.turn - a.turn)
+    if (turnsToRevert.length === 0) throw new Error(`no file changes found from turn ${targetTurn} onwards`)
+    // Revert each turn in reverse order
+    const allRestored = []
+    const allErrors = []
+    for (const turnData of turnsToRevert) {
+      for (const op of turnData.operations) {
+        const filePath = op.args.file_path
+        if (!filePath) continue
+        const fullPath = require('node:path').resolve(cwd, filePath)
+        try {
+          // Get the meta.diffs from the result
+          const meta = turnData.resultsByCallId.get(op.callId)
+          const diffs = meta && Array.isArray(meta.diffs) ? meta.diffs : []
+          const fileDiff = diffs.find((d) => d.path === filePath)
+          if (fileDiff && fileDiff.oldText !== null && fileDiff.oldText !== undefined) {
+            // We have oldText from meta.diffs - restore it
+            await ctx.fs.writeText(fullPath, fileDiff.oldText)
+            allRestored.push({ turn: turnData.turn, path: filePath })
+          } else if (fileDiff && fileDiff.oldText === null) {
+            // New file creation - delete the file
+            try {
+              await ctx.fs.remove(fullPath)
+              allRestored.push({ turn: turnData.turn, path: filePath + ' (deleted)' })
+            } catch {
+              allErrors.push({ turn: turnData.turn, path: filePath, error: 'new file cannot be deleted' })
             }
           } else {
-            errors.push({ path: filePath, error: 'cannot restore write operation (no oldText in meta)' })
+            // No meta.diffs available, try to reverse from args
+            if (op.name === 'edit') {
+              const currentContent = await ctx.fs.readText(fullPath)
+              const oldString = op.args.old_string || ''
+              const newString = op.args.new_string || ''
+              if (currentContent.includes(newString)) {
+                const restoredContent = currentContent.replace(newString, oldString)
+                await ctx.fs.writeText(fullPath, restoredContent)
+                allRestored.push({ turn: turnData.turn, path: filePath })
+              } else {
+                allErrors.push({ turn: turnData.turn, path: filePath, error: 'new_string not found in current file' })
+              }
+            } else {
+              allErrors.push({ turn: turnData.turn, path: filePath, error: 'cannot restore write operation (no oldText in meta)' })
+            }
           }
+        } catch (e) {
+          allErrors.push({ turn: turnData.turn, path: filePath, error: String(e.message || e) })
         }
-      } catch (e) {
-        errors.push({ path: filePath, error: String(e.message || e) })
       }
     }
     // Write-back: inject a message into the session so the agent knows about the restore
     try {
       const agent = ctx.agents.get(sessionId)
       if (agent) {
-        const fileList = restored.join(', ')
-        const errorList = errors.length > 0 ? `，${errors.length} 个文件恢复失败` : ''
-        const message = `用户撤销了 turn ${turn} 的代码修改，恢复了 ${restored.length} 个文件${errorList}：${fileList}。请知晓当前工作区已变更。`
+        const fileList = allRestored.map((r) => r.path).join(', ')
+        const errorList = allErrors.length > 0 ? `，${allErrors.length} 个文件恢复失败` : ''
+        const message = `用户将工作区恢复到 turn ${targetTurn} 之前的状态，撤销了 ${turnsToRevert.length} 个回合的修改，恢复了 ${allRestored.length} 个文件${errorList}：${fileList}。请知晓当前工作区已变更。`
         agent.followup({ role: 'user', content: [{ type: 'text', text: message }] })
       }
     } catch (e) {
       // followup 失败不影响恢复结果
-      errors.push({ path: '__followup__', error: `write-back failed: ${e.message}` })
+      allErrors.push({ path: '__followup__', error: `write-back failed: ${e.message}` })
     }
+    return { restored: allRestored, errors: allErrors, targetTurn, turnsReverted: turnsToRevert.map((t) => t.turn) }
     return { restored, errors, turn }
   }
   throw new Error(`unknown dsh-git method ${method}`)

@@ -351,7 +351,7 @@ P2 在 P1 基础上扩展了恢复功能。**核心设计变更**：恢复操作
 ```javascript
 const agent = ctx.agents.get(sessionId)
 if (agent) {
-  const message = `用户撤销了 turn ${turn} 的代码修改，恢复了 ${restored.length} 个文件：${fileList}。请知晓当前工作区已变更。`
+  const message = `用户将工作区恢复到 turn ${targetTurn} 之前的状态，撤销了 ${turnsReverted.length} 个回合的修改，恢复了 ${restored.length} 个文件：${fileList}。请知晓当前工作区已变更。`
   agent.followup({ role: 'user', content: [{ type: 'text', text: message }] })
 }
 ```
@@ -359,6 +359,26 @@ if (agent) {
 - 消息在 agent 下一轮对话时必读
 - 消除信息差：agent 知道文件被恢复了
 - followup 失败不影响恢复结果（降级为静默恢复）
+
+### 恢复逻辑
+
+**核心设计**：恢复到某个回合的状态 = 撤销该回合及之后的所有修改
+
+```
+当前状态：回合 1 → 2 → 3 → 4 → 5 → 6 → 7
+用户点击回合 5 的"恢复到此"
+实际操作：撤销回合 7 → 撤销回合 6 → 撤销回合 5
+结果：回到回合 4 的状态
+```
+
+**原因**：
+- 后面的回合可能会修改前面回合已经修改过的内容（交叉修改）
+- 如果只撤销单个回合，会导致文件状态不一致
+- 按时间倒序撤销可以保证正确性
+
+**数据来源**：
+- 使用 `tool/result` 事件的 `meta.diffs.oldText`（修改前的内容）
+- 不依赖 git，直接从会话日志获取
 
 ### 待完善
 
