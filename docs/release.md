@@ -111,7 +111,7 @@ dsh-git/
 - `p0/`、`p1/`：动态插件验证源码（host/client 可读版 + 紧凑版），已验证：
   会话日志 meta 读回、插件侧 git 子进程（可 push）、Slot 渲染、RPC 闭环
   （RPC 往返只为合法 JSON，参数不得含 undefined）。
-- 待移植：host `GitService`（status/diff/commit/readFile）+ client 面板（变更/提交/预览/回合卡）。
+- 待移植：host `GitService`（status/diff/commit/readFile）+ client 面板（变更/提交/预览）+ 官方 chip 的悬停 diff 浮窗。
 ## 复盘：为什么之前那么复杂（教训）
 
 | 踩坑 | 根因 |

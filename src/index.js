@@ -1,13 +1,16 @@
 /**
- * dsh-git host half: one Connection RPC interceptor over /api that exposes
- * status/diff/commit/readFile/turnDiff/ledger/restore without requiring a
+ * dsh-git host half: one self-registered `/dsh-git` envelope route that exposes
+ * status/diff/commit/readFile/turnDiff/recentTurns/ledger without requiring a
  * compile-time api-remotes contribution. This keeps the bundle installable by
  * `dsh plugin add` while a Remote namespace would force the host into the
  * harness source tree.
  * @module dsh-git
  */
 
-export const inject = ['connection', 'subprocess', 'sessionQuery', 'fs', 'sessionPersistence', 'agents']
+// `webServer` is declared because this plugin registers its own `/dsh-git`
+// prefix route, and `connection` supplies the shared Host/Origin + browser-auth
+// rejection used by that route.
+export const inject = ['connection', 'webServer', 'subprocess', 'sessionQuery', 'fs', 'sessionPersistence']
 
 const ENDPOINT_PREFIX = 'dshGit/'
 const ENDPOINT_PATTERN = /^dshGit\/[A-Za-z0-9_]+$/
@@ -77,9 +80,13 @@ async function cwdOf(ctx, sessionId) {
     throw new Error('sessionId required')
   }
   if (ctx.sessionPersistence && typeof ctx.sessionPersistence.list === 'function') {
-    const headers = await ctx.sessionPersistence.list()
-    for (const header of headers) {
-      if (header.id === sessionId && typeof header.cwd === 'string') return header.cwd
+    const snapshots = await ctx.sessionPersistence.list()
+    for (const snapshot of snapshots) {
+      // list() yields SessionPersistenceSnapshot { header, revision, ... }; older
+      // lines yielded the header directly. Accept both, otherwise this fast path
+      // never matches and every call falls back to a full session replay.
+      const header = snapshot && typeof snapshot === 'object' && snapshot.header ? snapshot.header : snapshot
+      if (header && header.id === sessionId && typeof header.cwd === 'string') return header.cwd
     }
   }
   const persistence = ctx.sessionPersistence || ctx.sessionQuery
@@ -93,6 +100,9 @@ async function cwdOf(ctx, sessionId) {
 
 /** Per-turn modifications around the turn's ending seq: write/edit calls paired with their result-time diff hunks. */
 const windowCache = new Map() // `${sessionId}@${fromSeq}` -> events array (last 2 windows per session kept)
+
+/** Result sentinel for a tool call that errored: it changed nothing, so it contributes no hunks. */
+const FAILED_RESULT = Symbol('dsh-git failed tool result')
 
 /** Full-log cache (non-lazy): first call reads everything, later calls extend from the cached watermark. */
 const logCache = new Map()
@@ -118,7 +128,9 @@ async function turnDiff(ctx, sessionId, turn) {
   const events = await sessionEvents(ctx, sessionId)
   const summaries = scanTurns(events, 0)
   const found = summaries.find((s) => s.turn === turn)
-  return { files: found ? found.files : [] }
+  const files = found ? found.files : []
+  await anchorTurnFiles(ctx, sessionId, files, new Map())
+  return { files }
 }
 function scanTurns(events, maxTurns) {
   const byTurn = new Map()
@@ -133,13 +145,18 @@ function scanTurns(events, maxTurns) {
       try { parsed = JSON.parse(p.arguments || '{}') } catch (_) {}
       let t = byTurn.get(turnNo)
       if (t === undefined) { t = { calls: new Map(), results: new Map() }; byTurn.set(turnNo, t) }
-      t.calls.set(p.callId, { name: p.name, args: parsed || {} })
+      t.calls.set(p.callId, { callId: p.callId, name: p.name, args: parsed || {} })
     } else if (ev.type === 'tool/result') {
       const callId = (p.message && p.message.source && p.message.source.callId) || p.callId
       let t = byTurn.get(turnNo)
       if (t === undefined) { t = { calls: new Map(), results: new Map() }; byTurn.set(turnNo, t) }
-      t.results.set(p.resultSeq ?? callId, p.meta)
-      t.results.set(callId, p.meta)
+      // A refused edit (old_string not found, bad arguments) applied NOTHING; its
+      // result carries no diff meta and its arguments must never be replayed as a
+      // change, or the turn would claim an edit the file never received.
+      const content = p.message && p.message.content
+      const failed = Array.isArray(content) && content[0] !== undefined && content[0].isError === true
+      t.results.set(p.resultSeq ?? callId, failed ? FAILED_RESULT : p.meta)
+      t.results.set(callId, failed ? FAILED_RESULT : p.meta)
     }
   }
   const summaries = []
@@ -148,6 +165,7 @@ function scanTurns(events, maxTurns) {
     for (const call of t.calls.values()) {
       const path = call.args.file_path
       const meta = t.results.get(call.callId)
+      if (meta === FAILED_RESULT) continue
       const diffs = meta && Array.isArray(meta.diffs) ? meta.diffs : []
       const hunks = []
       if (diffs.length > 0) {
@@ -170,6 +188,9 @@ function scanTurns(events, maxTurns) {
         const e = byPath.get(path)
         e.add += add
         e.del += del
+        // Each call's hunks are ordered within that call, but one call may touch
+        // an earlier line than the previous one, so anchoring restarts per call.
+        hk.call = call.callId
         e.hunks.push(hk)
       }
     }
@@ -177,6 +198,129 @@ function scanTurns(events, maxTurns) {
   }
   summaries.sort((a, b) => a.turn - b.turn)
   return maxTurns > 0 ? summaries.slice(-maxTurns) : summaries
+}
+
+/* ── Absolute file line numbers for turn hunks ─────────────────────────────
+ *
+ * `write`/`edit` result metadata carries only per-hunk before/after text, so a
+ * hunk has no position. The diff surfaces show real file line numbers instead
+ * of a per-hunk 1..N sequence, so each hunk's new side is located in the file as
+ * it exists on disk and stamped with `newStart` (the file line of the hunk's
+ * first new-side line) plus `oldStart` (the same line on the old side — hunks
+ * are in file order, so it trails by the net lines the earlier hunks of that
+ * file added or removed).
+ *
+ * The anchor is verified against the whole hunk text first, then its leading
+ * lines, then a single line. A hunk that cannot be located keeps no start, and
+ * the client falls back to its hunk-relative numbering rather than pointing at
+ * the wrong place: for the turn that just finished the file IS the after-state
+ * (exact), while a later edit to the same lines makes the block mismatch and
+ * degrade instead of matching elsewhere.
+ */
+
+/** Split file/hunk text into lines; a trailing newline terminates, not adds. */
+function splitLines(text) {
+  if (text == null || text === '') return []
+  return (text.endsWith('\n') ? text.slice(0, -1) : text).split('\n')
+}
+
+/** First `from`-onward index where `block` matches `lines` exactly, or -1. */
+function locateBlock(lines, block, from) {
+  if (block.length === 0) return -1
+  outer: for (let i = Math.max(0, from); i + block.length <= lines.length; i++) {
+    for (let j = 0; j < block.length; j++) {
+      if (lines[i + j] !== block[j]) continue outer
+    }
+    return i
+  }
+  return -1
+}
+
+/**
+ * Stamp `oldStart`/`newStart` on every hunk that can be located in `fileLines`.
+ *
+ * Hunks arrive in call order, and one call's hunks are ordered and disjoint, but
+ * a later call may touch an earlier line than the previous one. Anchoring
+ * therefore restarts per call (`hunk.call`): the cursor is only a monotonic
+ * search hint inside one call, and the old-side offset only accumulates the net
+ * lines of that same call's earlier hunks.
+ */
+function anchorFileHunks(fileLines, hunks) {
+  let group
+  let cursor = 0
+  let delta = 0
+  for (const hunk of hunks) {
+    if (hunk.call !== group) {
+      group = hunk.call
+      cursor = 0
+      delta = 0
+    }
+    const newLines = splitLines(hunk.newText)
+    const oldLines = splitLines(hunk.oldText)
+    let newStart = null
+    if (hunk.oldText === null) {
+      newStart = 1 // a create starts at line 1
+    } else if (newLines.length > 0) {
+      let at = locateBlock(fileLines, newLines, cursor)
+      if (at === -1 && newLines.length > 1) {
+        at = locateBlock(fileLines, newLines.slice(0, Math.min(3, newLines.length)), cursor)
+      }
+      if (at === -1 && newLines.length > 1) at = locateBlock(fileLines, newLines.slice(0, 1), cursor)
+      if (at !== -1) newStart = at + 1
+    }
+    if (newStart !== null) {
+      hunk.newStart = newStart
+      hunk.oldStart = Math.max(1, newStart - delta)
+      cursor = newStart - 1 + newLines.length
+    }
+    delta += newLines.length - oldLines.length
+  }
+}
+
+/**
+ * Anchor one turn's file hunks against the working tree.
+ * @param ctx - host context (`fs` + session services).
+ * @param sessionId - session whose cwd resolves relative paths.
+ * @param files - the turn's `{ path, hunks }` entries (mutated in place).
+ * @param cache - per-request `path -> lines | null` map, so one file is read once.
+ */
+async function anchorTurnFiles(ctx, sessionId, files, cache) {
+  let cwd
+  try {
+    cwd = await cwdOf(ctx, sessionId)
+  } catch {
+    return // no cwd: leave every hunk with hunk-relative numbering
+  }
+  for (const file of files) {
+    if (!file || !Array.isArray(file.hunks) || file.hunks.length === 0) continue
+    let lines = cache.get(file.path)
+    if (lines === undefined) {
+      lines = null
+      try {
+        const target = await ctx.fs.resolve(file.path, { cwd })
+        const text = await ctx.fs.readText(target)
+        if (typeof text === 'string' && text.length <= 2_000_000) lines = splitLines(text)
+      } catch {
+        // Unreadable (deleted, outside the workspace, binary): keep the fallback.
+      }
+      cache.set(file.path, lines)
+    }
+    if (lines !== null) anchorFileHunks(lines, file.hunks)
+    // Present hunks in FILE order. Anchoring restarts per edit call, so call
+    // order is chronological, not positional: a later call may sit above an
+    // earlier one (the screenshot that prompted this showed 945-948 before 1-5).
+    // Unanchored hunks have no position and keep their relative order at the end.
+    file.hunks.sort((a, b) => hunkPosition(a) - hunkPosition(b))
+    // The call grouping is an anchoring input only; keep it out of the payload.
+    for (const hunk of file.hunks) delete hunk.call
+  }
+}
+
+/** File-order sort key of one hunk; unanchored hunks sort last. */
+function hunkPosition(hunk) {
+  if (Number.isInteger(hunk.newStart)) return hunk.newStart
+  if (Number.isInteger(hunk.oldStart)) return hunk.oldStart
+  return Number.MAX_SAFE_INTEGER
 }
 
 // ─── P2: Ledger & Checkpoints ───────────────────────────────────────────────
@@ -401,26 +545,6 @@ async function dispatch(ctx, method, args) {
     const text = await ctx.fs.readText(target)
     return { text: text.slice(0, 60_000) }
   }
-  if (method === 'turnOf') {
-    if (typeof args.messageId !== 'string') throw new Error('messageId required')
-    let lastSeq = args.upToSeq
-    if (typeof lastSeq !== 'number' || !Number.isFinite(lastSeq)) {
-      const surface = await ctx.sessionQuery.readSurface(args.sessionId)
-      lastSeq = surface ? (surface.lastSeq ?? 0) : 0
-    }
-    const fromSeq = Math.max(0, lastSeq - 20000)
-    const persistence = ctx.sessionPersistence || ctx.sessionQuery
-    const snap = persistence.readFrom
-      ? await persistence.readFrom(args.sessionId, fromSeq)
-      : { events: (await ctx.sessionQuery.readSession(args.sessionId)).events }
-    let turn = null
-    for (const ev of snap.events || []) {
-      if (ev.type !== 'assistant/message') continue
-      const p = ev.data !== undefined ? ev.data : ev
-      if (p.message && p.message.id === args.messageId) { turn = p.turn; break }
-    }
-    return { turn }
-  }
   if (method === 'turnDiff') {
     return await turnDiff(ctx, args.sessionId, args.turn, args.upToSeq)
   }
@@ -436,7 +560,10 @@ async function dispatch(ctx, method, args) {
     const snap = persistence.readFrom
       ? await persistence.readFrom(args.sessionId, fromSeq)
       : { events: (await ctx.sessionQuery.readSession(args.sessionId)).events }
-    return { turns: scanTurns(snap.events || [], limit) }
+    const turns = scanTurns(snap.events || [], limit)
+    const cache = new Map()
+    for (const summary of turns) await anchorTurnFiles(ctx, args.sessionId, summary.files, cache)
+    return { turns }
   }
   // ─── P2: Ledger & Restore ─────────────────────────────────────────────────
   if (method === 'ledger.list') {
@@ -485,139 +612,117 @@ async function dispatch(ctx, method, args) {
     }
     return { result, restoreEntry }
   }
-  if (method === 'agent.status') {
-    // Check if agent is running (for mutex)
-    try {
-      const surface = await ctx.sessionQuery.readSurface(args.sessionId)
-      return { running: surface ? surface.running === true : false }
-    } catch {
-      return { running: false }
-    }
-  }
-  if (method === 'restoreTurn') {
-    if (typeof args.turn !== 'number') throw new Error('turn required')
-    const sessionId = args.sessionId
-    const targetTurn = args.turn
-    const cwd = await cwdOf(ctx, sessionId)
-    const events = await sessionEvents(ctx, sessionId)
-    // Build a map of all turns with file changes
-    const turnsWithChanges = new Map() // turn -> { operations, resultsByCallId }
-    for (const ev of events) {
-      if (ev.type !== 'tool/call') continue
-      const p = ev.data !== undefined ? ev.data : ev
-      if (typeof p.turn !== 'number') continue
-      if (p.name !== 'write' && p.name !== 'edit') continue
-      let parsed = null
-      try { parsed = JSON.parse(p.arguments || '{}') } catch (_) {}
-      if (!parsed) continue
-      if (!turnsWithChanges.has(p.turn)) {
-        turnsWithChanges.set(p.turn, { operations: [], resultsByCallId: new Map() })
-      }
-      turnsWithChanges.get(p.turn).operations.push({ name: p.name, args: parsed, callId: p.callId })
-    }
-    // Collect results for each turn
-    for (const ev of events) {
-      if (ev.type !== 'tool/result') continue
-      const p = ev.data !== undefined ? ev.data : ev
-      if (typeof p.turn !== 'number') continue
-      const turnData = turnsWithChanges.get(p.turn)
-      if (!turnData) continue
-      const callId = (p.message && p.message.source && p.message.source.callId) || p.callId
-      if (callId) turnData.resultsByCallId.set(callId, p.meta)
-    }
-    // Find all turns >= targetTurn that have changes (these need to be reverted)
-    const turnsToRevert = []
-    for (const [turn, data] of turnsWithChanges) {
-      if (turn >= targetTurn) turnsToRevert.push({ turn, ...data })
-    }
-    // Sort by turn descending (revert latest first)
-    turnsToRevert.sort((a, b) => b.turn - a.turn)
-    if (turnsToRevert.length === 0) throw new Error(`no file changes found from turn ${targetTurn} onwards`)
-    // Revert each turn in reverse order
-    const allRestored = []
-    const allErrors = []
-    for (const turnData of turnsToRevert) {
-      for (const op of turnData.operations) {
-        const filePath = op.args.file_path
-        if (!filePath) continue
-        const fullPath = require('node:path').resolve(cwd, filePath)
-        try {
-          // Get the meta.diffs from the result
-          const meta = turnData.resultsByCallId.get(op.callId)
-          const diffs = meta && Array.isArray(meta.diffs) ? meta.diffs : []
-          const fileDiff = diffs.find((d) => d.path === filePath)
-          if (fileDiff && fileDiff.oldText !== null && fileDiff.oldText !== undefined) {
-            // We have oldText from meta.diffs - restore it
-            await ctx.fs.writeText(fullPath, fileDiff.oldText)
-            allRestored.push({ turn: turnData.turn, path: filePath })
-          } else if (fileDiff && fileDiff.oldText === null) {
-            // New file creation - delete the file
-            try {
-              await ctx.fs.remove(fullPath)
-              allRestored.push({ turn: turnData.turn, path: filePath + ' (deleted)' })
-            } catch {
-              allErrors.push({ turn: turnData.turn, path: filePath, error: 'new file cannot be deleted' })
-            }
-          } else {
-            // No meta.diffs available, try to reverse from args
-            if (op.name === 'edit') {
-              const currentContent = await ctx.fs.readText(fullPath)
-              const oldString = op.args.old_string || ''
-              const newString = op.args.new_string || ''
-              if (currentContent.includes(newString)) {
-                const restoredContent = currentContent.replace(newString, oldString)
-                await ctx.fs.writeText(fullPath, restoredContent)
-                allRestored.push({ turn: turnData.turn, path: filePath })
-              } else {
-                allErrors.push({ turn: turnData.turn, path: filePath, error: 'new_string not found in current file' })
-              }
-            } else {
-              allErrors.push({ turn: turnData.turn, path: filePath, error: 'cannot restore write operation (no oldText in meta)' })
-            }
-          }
-        } catch (e) {
-          allErrors.push({ turn: turnData.turn, path: filePath, error: String(e.message || e) })
-        }
-      }
-    }
-    // Write-back: inject a message into the session so the agent knows about the restore
-    try {
-      const agent = ctx.agents.get(sessionId)
-      if (agent) {
-        const fileList = allRestored.map((r) => r.path).join(', ')
-        const errorList = allErrors.length > 0 ? `，${allErrors.length} 个文件恢复失败` : ''
-        const message = `用户将工作区恢复到 turn ${targetTurn} 之前的状态，撤销了 ${turnsToRevert.length} 个回合的修改，恢复了 ${allRestored.length} 个文件${errorList}：${fileList}。请知晓当前工作区已变更。`
-        agent.followup({ role: 'user', content: [{ type: 'text', text: message }] })
-      }
-    } catch (e) {
-      // followup 失败不影响恢复结果
-      allErrors.push({ path: '__followup__', error: `write-back failed: ${e.message}` })
-    }
-    return { restored: allRestored, errors: allErrors, targetTurn, turnsReverted: turnsToRevert.map((t) => t.turn) }
-    return { restored, errors, turn }
-  }
   throw new Error(`unknown dsh-git method ${method}`)
 }
 
-export function apply(ctx) {
-  const remove = ctx.connection.rpc.handle(
-    '/dsh-git',
-    async (endpoint, payload) => {
-      try {
-        const args = plainArgs(payload)
-        const method = endpoint.slice(ENDPOINT_PREFIX.length)
-        const value = await dispatch(ctx, method, args)
-        return { ok: true, value }
-      } catch (error) {
-        return {
-          ok: false,
-          error: {
-            code: 'dsh-git-error',
-            message: error instanceof Error ? error.message : String(error),
-          },
-        }
+/* ── HTTP carrier for the /dsh-git envelope channel ──────────────────────── */
+
+/** Reject oversized envelopes before they are buffered (the client sends tiny JSON). */
+const MAX_BODY_BYTES = 4 * 1024 * 1024
+
+/** Read one request body as UTF-8 text, with a hard size cap. */
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = []
+    let size = 0
+    req.on('data', (chunk) => {
+      size += chunk.length
+      if (size > MAX_BODY_BYTES) {
+        reject(new Error('dsh-git request body too large'))
+        req.destroy()
+        return
       }
-    },
-  )
-  ctx.effect(() => remove, 'dsh-git host rpc')
+      chunks.push(chunk)
+    })
+    req.on('end', () => { resolve(Buffer.concat(chunks).toString('utf8')) })
+    req.on('error', reject)
+  })
+}
+
+/** Write one JSON response with explicit framing. */
+function writeJson(res, status, body) {
+  const text = JSON.stringify(body)
+  res.writeHead(status, {
+    'content-type': 'application/json; charset=utf-8',
+    'content-length': Buffer.byteLength(text),
+    'cache-control': 'no-store',
+  })
+  res.end(text)
+}
+
+/** Decode one client envelope and answer it in the Connection result shape. */
+async function answerEnvelope(ctx, envelope) {
+  try {
+    const endpoint = envelope !== null && typeof envelope === 'object' ? envelope.method : undefined
+    if (typeof endpoint !== 'string' || !ENDPOINT_PATTERN.test(endpoint)) {
+      throw new Error(`unknown dsh-git endpoint ${JSON.stringify(endpoint)}`)
+    }
+    const args = plainArgs(envelope.payload)
+    const value = await dispatch(ctx, endpoint.slice(ENDPOINT_PREFIX.length), args)
+    return { ok: true, value }
+  } catch (error) {
+    return {
+      ok: false,
+      error: {
+        code: 'dsh-git-error',
+        message: error instanceof Error ? error.message : String(error),
+        details: {},
+      },
+    }
+  }
+}
+
+/**
+ * Serve one POSTed Connection envelope on the plugin's own `/dsh-git` route.
+ *
+ * The plugin deliberately does NOT go through `connection.rpc.handle()`: that
+ * registry ends at `owner.effect(() => owner.webServer.register(route))` where
+ * `owner` is the connection service's OWN context (packages/client/connection
+ * /src/rpc-host.ts), and on the current harness line that context does not
+ * inject `webServer`, so the call throws
+ * `cannot get property "webServer" without inject` and the whole plugin fails
+ * to activate (observed live as a 405 on every `dshGit/*` request, because the
+ * prefix was never registered). Declaring `webServer` HERE — the plugin's own
+ * context — does resolve, so the prefix is registered directly instead.
+ *
+ * `connection.requestRejection` still applies the shared Host/Origin fence and
+ * browser-session authentication before the envelope is decoded, so the route
+ * is exactly as trusted as the built-in channels.
+ */
+async function handleRpcRequest(ctx, req, res) {
+  if (req.method !== 'POST') {
+    res.writeHead(405)
+    res.end('method not allowed')
+    return
+  }
+  const rejection = ctx.connection.requestRejection(req)
+  if (rejection !== undefined) {
+    res.writeHead(rejection)
+    res.end(rejection === 401 ? 'unauthorized' : 'forbidden')
+    return
+  }
+  let envelope
+  try {
+    envelope = JSON.parse(await readBody(req))
+  } catch {
+    res.writeHead(400)
+    res.end('invalid dsh-git request body')
+    return
+  }
+  const rpcId = envelope !== null && typeof envelope === 'object' && typeof envelope.rpcId === 'string'
+    ? envelope.rpcId
+    : ''
+  writeJson(res, 200, { type: 'server-response', rpcId, result: await answerEnvelope(ctx, envelope) })
+}
+
+export function apply(ctx) {
+  // `webServer` is in this plugin's own inject list, which is the whole point:
+  // the route is registered from the context that can actually resolve the
+  // service, and its lifetime follows this plugin's fiber (an HMR reload
+  // disposes and re-registers it cleanly).
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'prefix',
+    path: '/dsh-git',
+    handler: (req, res) => handleRpcRequest(ctx, req, res),
+  }), 'dsh-git rpc route')
 }

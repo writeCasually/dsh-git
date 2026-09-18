@@ -1,8 +1,10 @@
 'use strict'
 
-const BUILD_TS = '09-01 10:00:00'
+const BUILD_TS = '09-18 18:06:00'
 
 const React = require('react')
+
+/** `state.sessionId` is captured by the header button; the hover popover addresses the host RPC with it. */
 
 const CSS = [
   /* ── Git Panel — Redesigned UI ────────────────────────────────── */
@@ -51,30 +53,70 @@ const CSS = [
   '.dg-file-stat{font-family:var(--ds-font-family-code,ui-monospace,Menlo,monospace);font-size:11px;color:var(--dsw-alias-label-caption,#888);flex-shrink:0;white-space:nowrap}',
   '.dg-file-stat .dg-add{color:var(--dsw-alias-state-success-primary,#188038);font-weight:600}',
   '.dg-file-stat .dg-del{color:var(--dsw-alias-state-error-primary,#b3261e);font-weight:600}',
-  /* ── Diff viewer (unified, with line numbers) ── */
+  /* ── Diff viewer (side-by-side, one table so both panes stay aligned) ── */
   '.dg-diff-viewer{border:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.1));border-radius:8px;overflow:hidden;margin:8px 0;background:var(--dsw-alias-bg-base,#fff)}',
   '.dg-diff-file-header{display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--dsw-alias-interactive-bg,rgba(0,0,0,.03));border-bottom:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.06));font-family:var(--ds-font-family-code,ui-monospace,Menlo,monospace);font-size:12px;font-weight:600;color:var(--dsw-alias-label-primary)}',
   '.dg-diff-file-header .dg-file-badge{font-size:9px;width:16px;height:16px}',
   '.dg-diff-scroll{overflow:auto;max-height:400px}',
   '.dg-diff-table{width:100%;border-collapse:collapse;font-family:var(--ds-font-family-code,ui-monospace,SFMono-Regular,Menlo,monospace);font-size:12px;line-height:20px;table-layout:fixed}',
   '.dg-diff-table td{padding:0;vertical-align:top;white-space:pre;overflow:hidden;text-overflow:ellipsis}',
-  /* Line number gutter */
-  '.dg-dln{width:42px;min-width:42px;text-align:right;padding:0 6px 0 0 !important;color:var(--dsw-alias-label-caption,#aaa);user-select:none;border-right:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.06));font-size:11px}',
-  /* Diff line content */
-  '.dg-dlc{padding:0 8px 0 8px !important}',
-  /* Line type markers */
-  '.dg-diff-add .dg-dln{background:color-mix(in srgb,var(--dsw-alias-state-success-primary,#188038) 8%,transparent);color:color-mix(in srgb,var(--dsw-alias-state-success-primary,#188038) 50%,var(--dsw-alias-label-caption,#aaa))}',
-  '.dg-diff-add .dg-dlc{background:color-mix(in srgb,var(--dsw-alias-state-success-primary,#188038) 6%,transparent);color:var(--dsw-alias-state-success-primary,#188038)}',
-  '.dg-diff-del .dg-dln{background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#b3261e) 8%,transparent);color:color-mix(in srgb,var(--dsw-alias-state-error-primary,#b3261e) 50%,var(--dsw-alias-label-caption,#aaa))}',
-  '.dg-diff-del .dg-dlc{background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#b3261e) 6%,transparent);color:var(--dsw-alias-state-error-primary,#b3261e)}',
-  '.dg-diff-ctx .dg-dln{color:var(--dsw-alias-label-caption,#bbb)}',
-  '.dg-diff-ctx .dg-dlc{color:var(--dsw-alias-label-tertiary,#666)}',
+  /* Side-by-side columns: [old n°][mark][old code] │ [new n°][mark][new code]
+     The gutters are fixed px and the two code columns split whatever is left
+     equally; the table itself carries a `min-width` derived from the file's
+     longest line (see SPLIT_SIDE_PX), so a wide line widens both panes and the
+     scroll box pans the pair instead of clipping either one. */
+  '.dg-diff-split{tab-size:4}',
+  /* Wrap mode (the hover popover): the table is exactly the container's width
+     and a long line wraps inside its own pane, so both sides are fully readable
+     without horizontal panning. Rows still start on the same line because the
+     panes share one table row; only the wrapped cell grows taller. */
+  '.dg-diff-wrap{table-layout:fixed;width:100%}',
+  '.dg-diff-wrap td{white-space:pre-wrap;overflow-wrap:anywhere;text-overflow:clip;overflow:visible}',
+  '.dg-diff-wrap .dg-ds-num,.dg-diff-wrap .dg-ds-mark{white-space:nowrap;overflow:hidden}',
+  /* VSCode-style scroll mode (the popover's ⇄ 滚动): one table per side, each in
+     its own horizontal scroll box with a permanently visible scrollbar; the two
+     are mirrored by script. `table-layout: fixed` + a shared per-side min-width
+     keeps both scroll ranges identical, so the mirrored offset keeps a row's two
+     halves in the same column. */
+  '.dg-panes{display:flex;align-items:flex-start;width:100%}',
+  '.dg-pane{flex:1 1 50%;min-width:0;overflow-x:auto;overflow-y:hidden;scrollbar-width:thin;scrollbar-color:var(--dsw-alias-border-l1,rgba(0,0,0,.32)) transparent}',
+  '.dg-pane+.dg-pane{border-left:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.12))}',
+  '.dg-pane-table{table-layout:fixed}',
+  '.dg-pane::-webkit-scrollbar{height:11px}',
+  '.dg-pane::-webkit-scrollbar-track{background:var(--dsw-alias-interactive-bg,rgba(0,0,0,.04))}',
+  '.dg-pane::-webkit-scrollbar-thumb{background:var(--dsw-alias-border-l1,rgba(0,0,0,.32));border-radius:6px;border:2px solid transparent;background-clip:padding-box}',
+  '.dg-pane::-webkit-scrollbar-thumb:hover{background:var(--dsw-alias-label-tertiary,#888);background-clip:padding-box}',
+  /* Horizontal panning must not take the gutter with it: the line-number and
+     sign columns stay pinned at the pane's left edge (VSCode does the same), so
+     a scrolled row still shows which lines it is. Sticky cells need an OPAQUE
+     background or the code slides underneath them; the row-state tints are
+     translucent by design, so the pinned cells re-mix that tint over the
+     popover's own fill instead of over `transparent`. */
+  '.dg-pane .dg-ds-num,.dg-pane .dg-ds-mark{position:sticky;z-index:2;background:var(--dsw-alias-bg-overlay,var(--dsw-alias-bg-base,#fff))}',
+  '.dg-pane .dg-ds-num{left:0}',
+  '.dg-pane .dg-ds-mark{left:44px;box-shadow:1px 0 0 var(--dsw-alias-border-l1,rgba(0,0,0,.12))}',
+  '.dg-pane .dg-ds-del.dg-ds-num,.dg-pane .dg-ds-del.dg-ds-mark{background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#b3261e) 9%,var(--dsw-alias-bg-overlay,var(--dsw-alias-bg-base,#fff)))}',
+  '.dg-pane .dg-ds-add.dg-ds-num,.dg-pane .dg-ds-add.dg-ds-mark{background:color-mix(in srgb,var(--dsw-alias-state-success-primary,#188038) 9%,var(--dsw-alias-bg-overlay,var(--dsw-alias-bg-base,#fff)))}',
+  '.dg-pane .dg-ds-void.dg-ds-num,.dg-pane .dg-ds-void.dg-ds-mark{background:color-mix(in srgb,#000 4%,var(--dsw-alias-bg-overlay,var(--dsw-alias-bg-base,#fff)))}',
+  '.dg-ds-num{width:44px;text-align:right;padding:0 6px 0 0 !important;color:var(--dsw-alias-label-caption,#aaa);user-select:none;font-size:11px}',
+  '.dg-ds-mark{width:13px;text-align:center;color:var(--dsw-alias-label-caption,#bbb);user-select:none;font-size:11px}',
+  '.dg-ds-code{padding:0 8px 0 8px !important;color:var(--dsw-alias-label-tertiary,#666)}',
+  /* Pane divider + the "no line on this side" filler */
+  '.dg-ds-div{border-left:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.12))}',
+  '.dg-ds-void{background:var(--dsw-alias-interactive-bg,rgba(0,0,0,.035))}',
+  /* Per-cell line state (a modified row is del on the left, add on the right) */
+  '.dg-ds-del{background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#b3261e) 6%,transparent)}',
+  '.dg-ds-del.dg-ds-num,.dg-ds-del.dg-ds-mark{background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#b3261e) 9%,transparent);color:color-mix(in srgb,var(--dsw-alias-state-error-primary,#b3261e) 55%,var(--dsw-alias-label-caption,#aaa))}',
+  '.dg-ds-del.dg-ds-code{color:var(--dsw-alias-state-error-primary,#b3261e)}',
+  '.dg-ds-add{background:color-mix(in srgb,var(--dsw-alias-state-success-primary,#188038) 6%,transparent)}',
+  '.dg-ds-add.dg-ds-num,.dg-ds-add.dg-ds-mark{background:color-mix(in srgb,var(--dsw-alias-state-success-primary,#188038) 9%,transparent);color:color-mix(in srgb,var(--dsw-alias-state-success-primary,#188038) 55%,var(--dsw-alias-label-caption,#aaa))}',
+  '.dg-ds-add.dg-ds-code{color:var(--dsw-alias-state-success-primary,#188038)}',
   /* Hunk header */
   '.dg-diff-hunk{background:color-mix(in srgb,var(--dsw-alias-state-business-primary,#3b82f6) 6%,transparent)}',
   '.dg-diff-hunk td{color:var(--dsw-alias-state-business-primary,#3b82f6);font-weight:500;padding:3px 8px !important;font-size:11px}',
   /* Diff footer */
   '.dg-diff-footer{display:flex;align-items:center;justify-content:space-between;padding:6px 12px;border-top:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.06));font-size:11px;color:var(--dsw-alias-label-caption,#999);background:var(--dsw-alias-interactive-bg,rgba(0,0,0,.02))}',
-  /* ── Turn summary card (turnTail chain) ── */
+  /* ── Recent-turns list in the panel (fold-out per-file diffs) ── */
   '.dg-turn{position:relative;margin:8px 0;padding:10px 12px 10px 14px;border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.08));border-radius:10px;background:var(--dsw-alias-bg-base,transparent)}',
   '.dg-turn::before{content:"";position:absolute;left:0;top:12px;bottom:12px;width:2px;border-radius:1px;background:var(--dsw-alias-state-business-primary,#8ab4f8)}',
   '.dg-turn-head{display:flex;align-items:center;gap:8px;margin-bottom:6px}',
@@ -83,11 +125,37 @@ const CSS = [
   '.dg-turn-stat{margin-left:auto;font-family:var(--ds-font-family-code,ui-monospace,Menlo,monospace);font-size:12px;color:var(--dsw-alias-label-caption,#888);white-space:nowrap}',
   '.dg-turn-stat .dg-add{color:var(--dsw-alias-state-success-primary,#188038)}',
   '.dg-turn-stat .dg-del{color:var(--dsw-alias-state-error-primary,#b3261e)}',
-  /* ── Expandable file in turn summary ── */
   '.dg-file-toggle{display:flex;align-items:center;gap:6px;padding:4px 6px;cursor:pointer;border-radius:5px;transition:background .1s;margin:1px 0}',
   '.dg-file-toggle:hover{background:var(--dsw-alias-interactive-bg,rgba(0,0,0,.04))}',
   '.dg-file-chev{color:var(--dsw-alias-label-caption,#aaa);font-size:10px;flex-shrink:0;transition:transform .15s ease;width:12px;text-align:center}',
   '.dg-file-open .dg-file-chev{transform:rotate(90deg)}',
+  /* ── Hover diff popover (official 「本轮文件改动」 chips) ──────────
+     Raised from the chat's `shell.overlay` seat and positioned against the
+     hovered chip's viewport rect, so no ancestor's `overflow` can clip it.
+     The head stays put while both diff panes scroll together underneath. */
+  '.dg-diff-pop{position:fixed;z-index:2100;box-sizing:border-box;display:flex;flex-direction:column;border:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.12));border-radius:10px;background:var(--dsw-alias-bg-overlay,var(--dsw-alias-bg-base,#fff));box-shadow:0 12px 32px rgba(0,0,0,.18),0 2px 8px rgba(0,0,0,.08);overflow:hidden;color:var(--dsw-alias-label-primary,#1a1a1a);font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;pointer-events:auto}',
+  '.dg-diff-pop-head{display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--dsw-alias-interactive-bg,rgba(0,0,0,.03));border-bottom:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.06));font-family:var(--ds-font-family-code,ui-monospace,Menlo,monospace);font-size:12px;font-weight:600;flex-shrink:0}',
+  '.dg-diff-pop-head .dg-file-badge{font-size:9px;width:16px;height:16px}',
+  '.dg-diff-pop-path{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+  '.dg-diff-pop-turn{font-weight:400;font-size:11px;color:var(--dsw-alias-label-caption,#999);flex-shrink:0}',
+  '.dg-diff-pop-stat{font-weight:400;font-size:11px;color:var(--dsw-alias-label-caption,#888);flex-shrink:0;white-space:nowrap}',
+  '.dg-diff-pop-stat .dg-add{color:var(--dsw-alias-state-success-primary,#188038)}',
+  '.dg-diff-pop-stat .dg-del{color:var(--dsw-alias-state-error-primary,#b3261e)}',
+  '.dg-diff-pop-toggle{flex-shrink:0;font-family:inherit;font-size:11px;line-height:16px;padding:1px 7px;border-radius:5px;cursor:pointer;border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.1));background:var(--dsw-alias-interactive-bg,rgba(0,0,0,.04));color:var(--dsw-alias-label-secondary,#555)}',
+  '.dg-diff-pop-toggle:hover{color:var(--dsw-alias-label-primary,#1a1a1a);background:var(--dsw-alias-interactive-bg-hover-solid,rgba(0,0,0,.08))}',
+  /* The body is the popover's only scroll box (the inner viewer box is
+     neutralised below). Keep a real, permanently visible scrollbar rather than
+     the OS overlay kind, so "there is more diff to the right" is never a guess. */
+  '.dg-diff-pop-body{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain;scrollbar-width:thin;scrollbar-color:var(--dsw-alias-border-l1,rgba(0,0,0,.28)) transparent}',
+  '.dg-diff-pop-body::-webkit-scrollbar{width:10px;height:10px}',
+  '.dg-diff-pop-body::-webkit-scrollbar-track{background:var(--dsw-alias-interactive-bg,rgba(0,0,0,.03))}',
+  '.dg-diff-pop-body::-webkit-scrollbar-thumb{background:var(--dsw-alias-border-l1,rgba(0,0,0,.28));border-radius:5px;border:2px solid transparent;background-clip:padding-box}',
+  '.dg-diff-pop-body::-webkit-scrollbar-thumb:hover{background:var(--dsw-alias-label-tertiary,#888);background-clip:padding-box}',
+  /* Inside the popover the outer body is the single scroll box: drop the
+     viewer chrome and let a wide line pan BOTH panes inside it. */
+  '.dg-diff-pop .dg-diff-viewer{margin:0;border:none;border-radius:0;background:transparent}',
+  '.dg-diff-pop .dg-diff-scroll{max-height:none;overflow:visible}',
+  '.dg-diff-pop .dg-empty{padding:16px}',
   /* ── Status rows (staged/unstaged/untracked lists) ── */
   '.dg-status-row{display:flex;align-items:center;gap:6px;padding:4px 6px;border-radius:5px;cursor:pointer;transition:background .1s;margin:1px 0}',
   '.dg-status-row:hover{background:var(--dsw-alias-interactive-bg,rgba(0,0,0,.04))}',
@@ -110,10 +178,10 @@ const CSS = [
   '.dg-spinner{width:14px;height:14px;border:2px solid var(--dsw-alias-border-l2,rgba(0,0,0,.1));border-top-color:var(--dsw-alias-state-business-primary,#3b82f6);border-radius:50%;animation:dg-spin .6s linear infinite}',
   '@keyframes dg-spin{to{transform:rotate(360deg)}}',
   /* ── Scrollbar styling ── */
-  '.dg-panel-body::-webkit-scrollbar,.dg-diff-scroll::-webkit-scrollbar{width:6px;height:6px}',
-  '.dg-panel-body::-webkit-scrollbar-track,.dg-diff-scroll::-webkit-scrollbar-track{background:transparent}',
-  '.dg-panel-body::-webkit-scrollbar-thumb,.dg-diff-scroll::-webkit-scrollbar-thumb{background:var(--dsw-alias-border-l2,rgba(0,0,0,.12));border-radius:3px}',
-  '.dg-panel-body::-webkit-scrollbar-thumb:hover,.dg-diff-scroll::-webkit-scrollbar-thumb:hover{background:var(--dsw-alias-border-l1,rgba(0,0,0,.2))}',
+  '.dg-panel-body::-webkit-scrollbar,.dg-diff-scroll::-webkit-scrollbar,.dg-diff-pop-body::-webkit-scrollbar{width:6px;height:6px}',
+  '.dg-panel-body::-webkit-scrollbar-track,.dg-diff-scroll::-webkit-scrollbar-track,.dg-diff-pop-body::-webkit-scrollbar-track{background:transparent}',
+  '.dg-panel-body::-webkit-scrollbar-thumb,.dg-diff-scroll::-webkit-scrollbar-thumb,.dg-diff-pop-body::-webkit-scrollbar-thumb{background:var(--dsw-alias-border-l2,rgba(0,0,0,.12));border-radius:3px}',
+  '.dg-panel-body::-webkit-scrollbar-thumb:hover,.dg-diff-scroll::-webkit-scrollbar-thumb:hover,.dg-diff-pop-body::-webkit-scrollbar-thumb:hover{background:var(--dsw-alias-border-l1,rgba(0,0,0,.2))}',
 ].join('\n')
 
 let rootCtx = null
@@ -135,7 +203,7 @@ async function callRemote(endpoint, args) {
   throw new Error(error.message || error.code || 'dsh-git remote call failed')
 }
 
-const state = { open: false, sessionId: null, tailSeen: {} }
+const state = { open: false, sessionId: null }
 const listeners = new Set()
 
 function emit() {
@@ -247,10 +315,214 @@ function parseUnifiedDiff(diffText) {
   return files
 }
 
-/* ── Diff Viewer Component ───────────────────────────────────────── */
+/* ── Diff Viewer Component (side-by-side) ────────────────────────── */
 
+/** Columns of the split table: old n° / mark / code │ new n° / mark / code. */
+const SPLIT_COL_COUNT = 6
+/** Fixed width of one side's gutters (line-number column + sign column), in px. */
+const SPLIT_GUTTER_PX = 57
+/** Code-cell horizontal padding, in px (8px each side). */
+const SPLIT_PADDING_PX = 16
+/** Everything one side spends besides code: gutters plus padding, in px. */
+const SPLIT_SIDE_PX = SPLIT_GUTTER_PX + SPLIT_PADDING_PX
+/** Code points that occupy two cells in a monospace run (CJK, fullwidth forms). */
+const SPLIT_WIDE_RE = /[\u1100-\u115F\u2E80-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE30-\uFE6F\uFF00-\uFF60\uFFE0-\uFFE6]/
+
+/** Badge class for one file status letter (shared by every surface). */
+function statusBadgeClass(status) {
+  return status === 'A' ? 'dg-file-badge-a'
+    : status === 'D' ? 'dg-file-badge-d'
+      : status === '?' ? 'dg-file-badge-u'
+        : 'dg-file-badge-m'
+}
+
+/**
+ * Display width of one diff line in `ch` units: a tab expands to four cells and
+ * a wide (CJK/fullwidth) code point to two, matching how a monospace run lays
+ * that text out.
+ * @param text - one line of code.
+ * @returns its width in `ch`.
+ */
+function splitLineWidth(text) {
+  if (typeof text !== 'string' || text === '') return 0
+  let width = 0
+  for (const ch of text) width += ch === '\t' ? 4 : SPLIT_WIDE_RE.test(ch) ? 2 : 1
+  return width
+}
+
+/**
+ * Width of a file's longest line, in `ch` units. The split columns are sized
+ * from it so that every line is readable instead of being clipped.
+ * @param file - `{ hunks }`.
+ * @returns the widest line, in `ch`.
+ */
+function splitContentWidth(file) {
+  let width = 0
+  for (const hunk of file.hunks) {
+    for (const line of hunk.lines) {
+      const lineWidth = splitLineWidth(line.text)
+      if (lineWidth > width) width = lineWidth
+    }
+  }
+  return width
+}
+
+/**
+ * Pair one hunk's lines into aligned left/right rows.
+ *
+ * Unified output already writes a change block as "every deletion, then every
+ * addition", so zipping those two runs index-wise reproduces the usual
+ * side-by-side pairing: the shorter run leaves `null` on that side and the row
+ * renders dimmed filler cells there, which is what keeps the two panes on the
+ * same line. Context lines occupy both panes; `info` lines
+ * (e.g. "\ No newline at end of file") span the whole row.
+ * @param lines - parsed hunk lines.
+ * @returns rows of `{ left, right, kind }`, or `{ info }`.
+ */
+function splitRows(lines) {
+  const rows = []
+  let i = 0
+  while (i < lines.length) {
+    const line = lines[i]
+    if (line.kind === 'ctx') {
+      rows.push({ left: line, right: line, kind: 'ctx' })
+      i++
+      continue
+    }
+    if (line.kind === 'info') {
+      rows.push({ info: line })
+      i++
+      continue
+    }
+    const dels = []
+    const adds = []
+    while (i < lines.length && (lines[i].kind === 'del' || lines[i].kind === 'add')) {
+      if (lines[i].kind === 'del') dels.push(lines[i])
+      else adds.push(lines[i])
+      i++
+    }
+    const height = Math.max(dels.length, adds.length)
+    for (let k = 0; k < height; k++) {
+      const left = dels[k] || null
+      const right = adds[k] || null
+      rows.push({ left, right, kind: left === null ? 'add' : right === null ? 'del' : 'change' })
+    }
+  }
+  return rows
+}
+
+/**
+ * The three cells of one side of a split row: line number, sign, code. A `null`
+ * line means this side has no counterpart on that row, so every cell is a
+ * dimmed placeholder instead.
+ * @param line - the line, or null for the empty side.
+ * @param side - 'left' (old numbers) or 'right' (new numbers).
+ * @param kind - 'del', 'add' or 'ctx' (ignored when `line` is null).
+ * @param extra - extra classes for this side's cells.
+ */
+function splitCells(line, side, kind, extra) {
+  const state = line === null ? 'dg-ds-void' : kind === 'del' ? 'dg-ds-del' : kind === 'add' ? 'dg-ds-add' : ''
+  const num = line === null ? null : (side === 'left' ? line.oldNum : line.newNum)
+  const sign = line === null ? '' : kind === 'del' ? '−' : kind === 'add' ? '+' : ''
+  const suffix = ' ' + state + (extra || '')
+  return [
+    React.createElement('td', { key: side + '-n', className: 'dg-ds-num' + suffix }, num != null ? num : ''),
+    React.createElement('td', { key: side + '-m', className: 'dg-ds-mark' + suffix }, sign),
+    React.createElement('td', { key: side + '-c', className: 'dg-ds-code' + suffix }, line === null ? '' : line.text),
+  ]
+}
+
+/**
+ * Flatten one file's parsed hunks into the row descriptors both layouts draw:
+ * `{ kind: 'hunk', text }` for separators/context/info rows, and
+ * `{ kind: 'change', left, right, contextual }` for a paired code row. Keeping
+ * one descriptor list is what lets the single-table and two-pane layouts stay
+ * row-for-row identical.
+ */
+function diffRowDescriptors(file) {
+  const rows = []
+  for (let hi = 0; hi < file.hunks.length; hi++) {
+    const hunk = file.hunks[hi]
+    if (hi > 0) rows.push({ kind: 'hunk', text: '⋯' })
+    if (hunk.context) rows.push({ kind: 'hunk', text: hunk.context })
+    const split = splitRows(hunk.lines)
+    for (const row of split) {
+      if (row.info) {
+        rows.push({ kind: 'hunk', text: row.info.text })
+        continue
+      }
+      rows.push({ kind: 'change', left: row.left, right: row.right, contextual: row.kind === 'ctx' })
+    }
+  }
+  return rows
+}
+
+/** Columns of one side's own table: [line n°][sign][code]. */
+const PANE_COLUMNS = [
+  React.createElement('col', { key: 'n', style: { width: 44 } }),
+  React.createElement('col', { key: 'm', style: { width: 13 } }),
+  React.createElement('col', { key: 'c' }),
+]
+
+/** One row of a single-side pane table. */
+function paneRow(row, side, index) {
+  if (row.kind === 'hunk') {
+    return React.createElement('tr', { key: index, className: 'dg-diff-hunk' },
+      React.createElement('td', { colSpan: 3 }, row.text))
+  }
+  const line = side === 'left' ? row.left : row.right
+  const kind = row.contextual ? 'ctx' : side === 'left' ? 'del' : 'add'
+  return React.createElement('tr', { key: index, className: 'dg-diff-row' }, splitCells(line, side, kind))
+}
+
+/**
+ * VSCode-style scroll mode: the old and new sides become two tables, each in
+ * its own horizontal scroll box with its own permanently visible scrollbar, and
+ * a scroll on either side mirrors onto the other so the two halves of a row stay
+ * column-aligned. Both panes take the SAME `min-width` (the widest line across
+ * both sides), so their scroll ranges are identical and an absolute scrollLeft
+ * mirror keeps the columns in step. Vertical scrolling stays with the popover
+ * body, which owns both panes.
+ */
+function SplitPanes(props) {
+  const leftRef = React.useRef(null)
+  const rightRef = React.useRef(null)
+  const lock = React.useRef(false)
+  const mirror = (from, to) => {
+    if (from === null || to === null || lock.current || to.scrollLeft === from.scrollLeft) return
+    lock.current = true
+    to.scrollLeft = from.scrollLeft
+    const release = () => { lock.current = false }
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(release)
+    else setTimeout(release, 0)
+  }
+  const pane = (ref, side, onScroll) => React.createElement('div', { className: 'dg-pane', ref, onScroll },
+    React.createElement('table', { className: 'dg-diff-table dg-pane-table', style: { minWidth: props.minWidth } },
+      React.createElement('colgroup', null, PANE_COLUMNS),
+      React.createElement('tbody', null, props.rows.map((row, index) => paneRow(row, side, index)))))
+  return React.createElement('div', { className: 'dg-panes' },
+    pane(leftRef, 'left', () => mirror(leftRef.current, rightRef.current)),
+    pane(rightRef, 'right', () => mirror(rightRef.current, leftRef.current)))
+}
+
+/**
+ * Render file diffs as aligned side-by-side panes (old on the left, new on the
+ * right).
+ *
+ * @param props.files - `FileDiff[]`, each `{ path, status, hunks }`.
+ * @param props.hideHeader - drop the per-file header; used when the caller's
+ *   own row already shows the badge, path and ± counts (the hover popover's
+ *   head does, as did the old turn card's file rows).
+ * @param props.wrap - wrap long code lines inside their own column of the single
+ *   table, so both sides fit the container at once (the popover's default).
+ * @param props.panes - draw the two synced per-side scroll panes instead of the
+ *   single six-column table (the popover's scroll mode).
+ */
 function DiffViewer(props) {
   const files = props.files || []
+  const showHeader = props.hideHeader !== true
+  const wrap = props.wrap === true
+  const panes = props.panes === true && wrap !== true
   if (files.length === 0) return React.createElement('div', { className: 'dg-empty' },
     React.createElement('div', { className: 'dg-empty-icon' }, '📄'),
     React.createElement('div', null, '无差异'))
@@ -258,45 +530,72 @@ function DiffViewer(props) {
   return React.createElement('div', null, files.map(function (file, fi) {
     const totalAdd = file.hunks.reduce(function (s, h) { return s + h.lines.filter(function (l) { return l.kind === 'add' }).length }, 0)
     const totalDel = file.hunks.reduce(function (s, h) { return s + h.lines.filter(function (l) { return l.kind === 'del' }).length }, 0)
-    const badgeClass = file.status === 'A' ? 'dg-file-badge-a' : file.status === 'D' ? 'dg-file-badge-d' : 'dg-file-badge-m'
+    const badgeClass = statusBadgeClass(file.status)
 
-    const rows = []
-    for (let hi = 0; hi < file.hunks.length; hi++) {
-      const hunk = file.hunks[hi]
-      // Hunk separator
-      if (hi > 0) {
-        rows.push(React.createElement('tr', { key: 'sep-' + hi, className: 'dg-diff-hunk' },
-          React.createElement('td', { colSpan: 3 }, '⋯')))
-      }
-      // Hunk header
-      if (hunk.context) {
-        rows.push(React.createElement('tr', { key: 'hk-' + hi, className: 'dg-diff-hunk' },
-          React.createElement('td', { colSpan: 3 }, hunk.context)))
-      }
-      for (let li = 0; li < hunk.lines.length; li++) {
-        const line = hunk.lines[li]
-        const cls = line.kind === 'add' ? 'dg-diff-add' : line.kind === 'del' ? 'dg-diff-del' : 'dg-diff-ctx'
-        rows.push(React.createElement('tr', { key: hi + '-' + li, className: cls },
-          React.createElement('td', { className: 'dg-dln' }, line.oldNum != null ? line.oldNum : ''),
-          React.createElement('td', { className: 'dg-dln' }, line.newNum != null ? line.newNum : ''),
-          React.createElement('td', { className: 'dg-dlc' }, line.text)))
-      }
+    // In the single table the two code columns are deliberately unspecified:
+    // under `table-layout: fixed` they split whatever the gutters leave, in
+    // equal halves. `min-width` keeps each half wide enough for the file's
+    // longest line when wrapping is off; wrap mode drops the floor entirely.
+    const columns = []
+    for (let ci = 0; ci < SPLIT_COL_COUNT; ci++) {
+      const narrow = ci === 1 || ci === 4
+      const gutter = ci === 0 || ci === 3
+      columns.push(React.createElement('col', {
+        key: ci,
+        style: narrow ? { width: 13 } : gutter ? { width: 44 } : null,
+      }))
     }
+    // `ch` is the monospace advance, so the content half needs no pixel
+    // measuring; the +1ch covers rounding, the px half the gutters and padding.
+    const minWidth = 'calc(' + (2 * (splitContentWidth(file) + 1)) + 'ch + '
+      + (2 * SPLIT_SIDE_PX) + 'px)'
+    // One pane is half the pair, so its floor is one side's worth of the same
+    // widest line — identical on both sides, which is what keeps the mirrored
+    // scrollLeft column-aligned.
+    const paneMinWidth = 'calc(' + (splitContentWidth(file) + 1) + 'ch + ' + SPLIT_SIDE_PX + 'px)'
+
+    const descriptors = diffRowDescriptors(file)
+    const rows = descriptors.map(function (row, index) {
+      if (row.kind === 'hunk') {
+        return React.createElement('tr', { key: index, className: 'dg-diff-hunk' },
+          React.createElement('td', { colSpan: SPLIT_COL_COUNT }, row.text))
+      }
+      const cells = splitCells(row.left, 'left', row.contextual ? 'ctx' : 'del')
+        .concat(splitCells(row.right, 'right', row.contextual ? 'ctx' : 'add', ' dg-ds-div'))
+      return React.createElement('tr', { key: index, className: 'dg-diff-row' }, cells)
+    })
+
+    // The header carries the ± totals; without it (caller already shows them)
+    // the footer only reports how many separate edits the block contains.
+    const footer = showHeader
+      ? React.createElement('div', { className: 'dg-diff-footer' },
+          React.createElement('span', null, file.hunks.length + ' hunk' + (file.hunks.length > 1 ? 's' : '')),
+          React.createElement('span', null, '+' + totalAdd + ' −' + totalDel))
+      : (file.hunks.length > 1
+          ? React.createElement('div', { className: 'dg-diff-footer' },
+              React.createElement('span', null, '共 ' + file.hunks.length + ' 处修改'))
+          : null)
+
+    const body = panes
+      ? React.createElement(SplitPanes, { rows: descriptors, minWidth: paneMinWidth })
+      : React.createElement('div', { className: 'dg-diff-scroll' },
+          React.createElement('table', {
+            className: 'dg-diff-table dg-diff-split' + (wrap ? ' dg-diff-wrap' : ''),
+            style: wrap ? null : { minWidth },
+          },
+            React.createElement('colgroup', null, columns),
+            React.createElement('tbody', null, rows)))
 
     return React.createElement('div', { key: file.path + fi, className: 'dg-diff-viewer' },
-      React.createElement('div', { className: 'dg-diff-file-header' },
+      showHeader ? React.createElement('div', { className: 'dg-diff-file-header' },
         React.createElement('span', { className: 'dg-file-badge ' + badgeClass }, file.status),
         React.createElement('span', { style: { flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, file.path),
         React.createElement('span', { style: { fontWeight: 400, fontSize: 11, color: 'var(--dsw-alias-label-caption,#888)' } },
           React.createElement('span', { className: 'dg-add' }, '+' + totalAdd),
           ' ',
-          React.createElement('span', { className: 'dg-del' }, '−' + totalDel))),
-      React.createElement('div', { className: 'dg-diff-scroll' },
-        React.createElement('table', { className: 'dg-diff-table' },
-          React.createElement('tbody', null, rows))),
-      React.createElement('div', { className: 'dg-diff-footer' },
-        React.createElement('span', null, file.hunks.length + ' hunk' + (file.hunks.length > 1 ? 's' : '')),
-        React.createElement('span', null, '+' + totalAdd + ' −' + totalDel)))
+          React.createElement('span', { className: 'dg-del' }, '−' + totalDel))) : null,
+      body,
+      footer)
   }))
 }
 
@@ -323,201 +622,446 @@ function HeaderButton(props) {
 function FileItem(props) {
   const path = props.path
   const badge = props.badge || 'M'
-  const badgeClass = badge === 'A' ? 'dg-file-badge-a' : badge === 'D' ? 'dg-file-badge-d' : badge === '?' ? 'dg-file-badge-u' : 'dg-file-badge-m'
   const selected = props.selected
   return React.createElement('div', {
     className: 'dg-file-item' + (selected ? ' dg-file-item-selected' : ''),
     onClick: props.onClick,
     title: path,
   },
-    React.createElement('span', { className: 'dg-file-badge ' + badgeClass }, badge),
+    React.createElement('span', { className: 'dg-file-badge ' + statusBadgeClass(badge) }, badge),
     React.createElement('span', { className: 'dg-file-name' }, path))
 }
 
-/* ── Conversation Node Definition (data layer, unchanged) ────────── */
+/* ── Hover diff popover (official 「本轮文件改动」 chips) ────────────
+ *
+ * The official `ui-deliverables` row owns `conversation.chat.turnTail` (a
+ * single-winner chain slot) and is left exactly as shipped. This plugin adds
+ * NO chain entry: it only watches pointer events on that row's chips
+ * (`[data-produced-files-row] button`) and raises a diff popover from its own
+ * `shell.overlay` seat.
+ *
+ * Chip → fact mapping is read from the official DOM contract:
+ *   - the chip's `title` carries the produced path;
+ *   - the turn number comes from the enclosing `[data-turn-tail]` wrapper,
+ *     falling back to the chat seat's `[data-chat-turn]` — a tool-only turn
+ *     (`closing === null`) renders the produced row WITHOUT the former;
+ *   - the viewed session id comes from `state.sessionId` (the header button
+ *     captures it for the whole plugin).
+ *
+ * The per-file diff is fetched once per session+turn (`dshGit/turnDiff`) and
+ * cached for the page's lifetime; a turn's recorded diffs never change after
+ * it is finalized.
+ */
 
-function dshGitDiffsDefinition() {
-  return {
-    kind: 'dsh-git-turn-diffs',
-    match: function match(event) {
-      if (event.type === 'turn/start') return { id: String(event.data.turn), role: 'start' }
-      if (event.type === 'tool/call') return { id: String(event.data.turn), role: 'update' }
-      if (event.type === 'tool/result') {
-        if (event.surfaceOp !== undefined && event.surfaceOp !== 'append') return null
-        return { id: String(event.data.turn), role: 'update' }
-      }
-      return null
-    },
-    start: function start(_context, match) {
-      if (match.event.type !== 'turn/start') throw new Error('dsh-git-turn-diffs start requires turn/start')
-      return { turn: match.event.data.turn, calls: new Map(), diffs: [] }
-    },
-    update: function update(context, match) {
-      if (match.event.type === 'tool/call') {
-        const p = match.event.data
-        if (p.name !== 'write' && p.name !== 'edit') return context.state
-        let args = null
-        try { args = JSON.parse(p.arguments || '{}') } catch (_) { /* skip */ }
-        const calls = new Map(context.state.calls)
-        calls.set(String(p.callId), { name: p.name, args: args || {} })
-        return { ...context.state, calls }
-      }
-      if (match.event.type !== 'tool/result') return context.state
-      const content = match.event.data.message && match.event.data.message.content
-      if (content && content[0] && content[0].isError === true) return context.state
-      const meta = match.event.data.meta
-      if (meta && typeof meta === 'object' && !Array.isArray(meta)
-        && Array.isArray(meta.diffs) && meta.diffs.length > 0) {
-        return { ...context.state, diffs: [...context.state.diffs, ...meta.diffs] }
-      }
-      const callId = match.event.data.message && match.event.data.message.source
-        ? String(match.event.data.message.source.callId)
-        : null
-      const call = callId === null ? undefined : context.state.calls.get(callId)
-      if (call === undefined) return context.state
-      const args = call.args || {}
-      if (call.name === 'write' && typeof args.file_path === 'string' && typeof args.content === 'string') {
-        return { ...context.state, diffs: [...context.state.diffs, { path: args.file_path, oldText: null, newText: args.content }] }
-      }
-      if (call.name === 'edit' && typeof args.file_path === 'string'
-        && typeof args.old_string === 'string' && typeof args.new_string === 'string') {
-        return { ...context.state, diffs: [...context.state.diffs, { path: args.file_path, oldText: args.old_string, newText: args.new_string }] }
-      }
-      return context.state
-    },
-    buildLocationData: function buildLocationData(context, scope) {
-      if (scope !== 'turn' || context.state === undefined) return null
-      return { kind: 'turn', turn: context.state.turn, key: 'dsh-git-turn-diffs', value: { diffs: context.state.diffs } }
-    },
-  }
+/** Delay before a hovered chip raises its popover (filters pass-over). */
+const HOVER_OPEN_DELAY_MS = 140
+/** Grace period after leaving a chip/popover, so moving between them is seamless. */
+const HOVER_CLOSE_DELAY_MS = 180
+/** Widest popover, in px (clamped to the viewport). The two code panes sit side
+ * by side, so the popover spans nearly the whole window rather than the chat
+ * column: a narrow popover halves each pane and clips real code. */
+const POPOVER_MAX_WIDTH = 1180
+/** Viewport gutter kept clear on either side of the popover, in px. */
+const POPOVER_VIEWPORT_MARGIN = 32
+/** Vertical room below the chip that keeps the popover below it. */
+const POPOVER_MIN_SPACE_BELOW = 260
+/** Tallest popover, in px. */
+const POPOVER_MAX_HEIGHT = 560
+/** Marks the popover so the hover delegation leaves its own events alone. */
+const POPOVER_ATTR = 'hover-diff'
+/** Fallback attribute holding a chip's path while its native tooltip is muted. */
+const CHIP_PATH_ATTR = 'data-dsh-git-path'
+
+const hoverListeners = new Set()
+/** Active popover target, or null when nothing is open. */
+let hoverActive = null
+let openTimer = null
+let closeTimer = null
+/** The chip whose `title` is temporarily muted (its popover already shows the path). */
+let mutedChip = null
+
+function hoverEmit() {
+  for (const fn of hoverListeners) fn()
 }
 
-function selectTurnDiffs(owner) {
-  const turnNumber = owner && owner.turn && owner.turn.turn
-  const data = owner && owner.turn && owner.turn.data && owner.turn.data.get('dsh-git-turn-diffs')
-  if (typeof turnNumber === 'number') {
-    state.tailSeen[turnNumber] = true
-    emit()
-  }
-  if (!data || !data.diffs || data.diffs.length === 0) return null
-  return data.diffs
+function subscribeHover(fn) {
+  hoverListeners.add(fn)
+  return () => hoverListeners.delete(fn)
 }
 
-function countLines(text) {
-  if (text == null || text === '') return 0
-  const body = text.endsWith('\n') ? text.slice(0, -1) : text
-  return body.split('\n').length
+function useHover() {
+  const [, force] = React.useState(0)
+  React.useEffect(() => subscribeHover(() => force((value) => value + 1)), [])
+  return hoverActive
 }
 
-/* ── Turn Diff Summary (turnTail chain) ──────────────────────────── */
+function setHover(next) {
+  hoverActive = next
+  hoverEmit()
+}
 
-function TurnDiffSummary(props) {
-  const allDiffs = props.matched || []
-  const turnNumber = props.turn && props.turn.turn
-  const [open, setOpen] = React.useState({})
-  const [confirmRestore, setConfirmRestore] = React.useState(false)
-  const [restoring, setRestoring] = React.useState(false)
-  const [agentRunning, setAgentRunning] = React.useState(false)
+/** Last path segment; used to match a chip against the host's recorded diff entries. */
+function baseName(path) {
+  const index = path.lastIndexOf('/')
+  return index === -1 ? path : path.slice(index + 1)
+}
 
-  React.useEffect(() => {
-    if (!state.sessionId) return
-    let alive = true
-    callRemote('dshGit/agent.status', { sessionId: state.sessionId })
-      .then((r) => { if (alive) setAgentRunning(r.running) })
-      .catch(() => { if (alive) setAgentRunning(false) })
-    return () => { alive = false }
-  }, [state.sessionId])
+/**
+ * Mute the hovered chip's native tooltip while its popover is open: the
+ * popover head already prints the full path, and the browser's own tooltip
+ * would otherwise pop over the diff a second later. The path is moved to a
+ * fallback data attribute so the same chip is still recognized when the
+ * pointer leaves and comes back.
+ */
+function muteChipTitle(chip) {
+  if (mutedChip === chip) return
+  restoreChipTitle()
+  const title = chip.getAttribute('title')
+  if (title === null) return
+  chip.setAttribute(CHIP_PATH_ATTR, title)
+  chip.removeAttribute('title')
+  mutedChip = chip
+}
 
-  if (!allDiffs || allDiffs.length === 0) return null
-  if (typeof turnNumber === 'number') { state.tailSeen[turnNumber] = true; emit() }
-
-  // Group diffs by path
-  const byPath = {}
-  for (let i = 0; i < allDiffs.length; i++) {
-    const d = allDiffs[i]
-    if (!byPath[d.path]) byPath[d.path] = { path: d.path, hunks: [], add: 0, del: 0 }
-    byPath[d.path].hunks.push(d)
-  }
-  const files = Object.keys(byPath).sort()
-  let totalAdd = 0, totalDel = 0
-  for (let i = 0; i < files.length; i++) {
-    const f = byPath[files[i]]
-    for (let j = 0; j < f.hunks.length; j++) {
-      const a = countLines(f.hunks[j].newText), d = countLines(f.hunks[j].oldText)
-      f.add += a; f.del += d; totalAdd += a; totalDel += d
+function restoreChipTitle() {
+  if (mutedChip !== null) {
+    const path = mutedChip.getAttribute(CHIP_PATH_ATTR)
+    if (path !== null && mutedChip.isConnected) {
+      mutedChip.setAttribute('title', path)
+      mutedChip.removeAttribute(CHIP_PATH_ATTR)
     }
   }
+  mutedChip = null
+}
 
-  const doRestore = () => {
-    if (!state.sessionId || !turnNumber || agentRunning) return
-    setRestoring(true)
-    callRemote('dshGit/restoreTurn', { sessionId: state.sessionId, turn: turnNumber })
-      .then((r) => {
-        setRestoring(false)
-        setConfirmRestore(false)
-        const turnsReverted = r.turnsReverted || [turnNumber]
-        alert(`已恢复到 turn ${turnNumber} 之前的状态，撤销了 ${turnsReverted.length} 个回合的修改，恢复了 ${r.restored.length} 个文件`)
-      })
-      .catch((e) => { setRestoring(false); alert('恢复失败: ' + (e.message || e)) })
+/** The produced-file chips in the official row can open a diff from cache. */
+const turnDiffCache = new Map()
+
+function loadTurnDiff(sessionId, turn) {
+  const key = sessionId + '\0' + turn
+  let pending = turnDiffCache.get(key)
+  if (pending === undefined) {
+    pending = callRemote('dshGit/turnDiff', { sessionId, turn }).catch((error) => {
+      turnDiffCache.delete(key) // a failed probe may be retried on the next hover
+      throw error
+    })
+    turnDiffCache.set(key, pending)
   }
+  return pending
+}
 
-  return React.createElement('div', { className: 'dg-turn', 'data-dsh-git': 'turn-summary', 'data-turn': turnNumber },
-    React.createElement('div', { className: 'dg-turn-head' },
-      React.createElement('span', { className: 'dg-turn-tag' }, 'dsh-git'),
-      React.createElement('span', { className: 'dg-turn-title' }, `本回合修改 ${files.length} 个文件`),
-      React.createElement('span', { className: 'dg-turn-stat' },
-        React.createElement('span', { className: 'dg-add' }, '+' + totalAdd), ' ',
-        React.createElement('span', { className: 'dg-del' }, '−' + totalDel)),
-      React.createElement('button', {
-        className: 'dg-btn dg-btn-sm',
-        style: { marginLeft: 6, opacity: agentRunning ? 0.5 : 1 },
-        disabled: agentRunning || restoring,
-        onClick: (e) => { e.stopPropagation(); setConfirmRestore(true) },
-        title: agentRunning ? 'agent 运行中，恢复已禁用' : '恢复到此回合之前的状态（撤销此回合及之后的所有修改）',
-      }, restoring ? '恢复中…' : '恢复到此')),
-    confirmRestore ? React.createElement('div', { className: 'dg-confirm' },
-      React.createElement('div', { className: 'dg-confirm-msg' }, `确认恢复到 turn ${turnNumber} 之前的状态？将撤销此回合及之后的所有修改。`),
-      React.createElement('div', { className: 'dg-btn-row' },
-        React.createElement('button', { className: 'dg-btn dg-btn-active', disabled: restoring, onClick: doRestore }, restoring ? '恢复中…' : '确认恢复'),
-        React.createElement('button', { className: 'dg-btn', onClick: () => setConfirmRestore(false) }, '取消'))) : null,
-    files.map(function (path) {
-      const f = byPath[path]
-      const opened = !!open[path]
-      // Build structured diff for this file
-      const fileDiffs = []
-      for (let j = 0; j < f.hunks.length; j++) {
-        const h = f.hunks[j]
-        const oldLines = h.oldText == null ? [] : (h.oldText === '' ? [] : (h.oldText.endsWith('\n') ? h.oldText.slice(0, -1) : h.oldText).split('\n'))
-        const newLines = h.newText == null ? [] : (h.newText === '' ? [] : (h.newText.endsWith('\n') ? h.newText.slice(0, -1) : h.newText).split('\n'))
-        const hunkLines = []
-        for (let k = 0; k < oldLines.length; k++) hunkLines.push({ kind: 'del', oldNum: k + 1, newNum: null, text: oldLines[k] })
-        for (let k = 0; k < newLines.length; k++) hunkLines.push({ kind: 'add', oldNum: null, newNum: k + 1, text: newLines[k] })
-        fileDiffs.push({ header: '', context: '', lines: hunkLines })
-      }
-      const status = (f.hunks.length > 0 && f.hunks[0].oldText === null) ? 'A' : 'M'
-      return React.createElement('div', { key: path },
-        React.createElement('div', {
-          className: 'dg-file-toggle' + (opened ? ' dg-file-open' : ''),
-          onClick: function(e) {
-            e.stopPropagation()
-            setOpen(function(o) {
-              const n = {}
-              for (const k in o) n[k] = o[k]
-              n[path] = !n[path]
-              return n
-            })
-          },
-          style: { cursor: 'pointer', userSelect: 'none' },
-        },
-          React.createElement('span', { className: 'dg-file-chev' }, opened ? '▾' : '▸'),
-          React.createElement('span', { className: 'dg-file-badge ' + (status === 'A' ? 'dg-file-badge-a' : 'dg-file-badge-m') }, status),
-          React.createElement('span', { className: 'dg-file-name' }, path),
-          React.createElement('span', { className: 'dg-file-stat' },
-            React.createElement('span', { className: 'dg-add' }, '+' + f.add), ' ',
-            React.createElement('span', { className: 'dg-del' }, '−' + f.del))),
-        opened ? React.createElement('div', { style: { margin: '4px 0 8px 20px' } },
-          React.createElement(DiffViewer, { files: [{ path, status, hunks: fileDiffs }] })) : null)
-    }))
+/** Split a hunk side into its lines (a trailing newline terminates, not adds). */
+function splitTextLines(text) {
+  if (text == null || text === '') return []
+  return (text.endsWith('\n') ? text.slice(0, -1) : text).split('\n')
+}
+
+/**
+ * Convert one host-side file record (`hunks: [{ oldText, newText, oldStart?,
+ * newStart? }]`) into the `FileDiff` shape `DiffViewer` consumes: each hunk
+ * becomes "every old line, then every new line", which `splitRows` pairs
+ * left/right.
+ *
+ * The host anchors each hunk in the file on disk and stamps `oldStart`/
+ * `newStart`, so the gutter shows REAL file line numbers (each side of a hunk is
+ * one contiguous run of its file version, so numbering from the start is
+ * enough). Without an anchor — unreadable file, or a later edit to the same
+ * lines — the gutter stays blank rather than inventing a position: a hunk-local
+ * 1..N sequence reads as real line numbers and points at the wrong place.
+ */
+function fileDiffFromHunks(path, hunks) {
+  const list = Array.isArray(hunks) ? hunks : []
+  const parts = []
+  for (const hunk of list) {
+    const oldLines = splitTextLines(hunk.oldText)
+    const newLines = splitTextLines(hunk.newText)
+    const oldStart = Number.isInteger(hunk.oldStart) ? hunk.oldStart : null
+    const newStart = Number.isInteger(hunk.newStart) ? hunk.newStart : null
+    const lines = []
+    for (let k = 0; k < oldLines.length; k++) {
+      lines.push({ kind: 'del', oldNum: oldStart === null ? null : oldStart + k, newNum: null, text: oldLines[k] })
+    }
+    for (let k = 0; k < newLines.length; k++) {
+      lines.push({ kind: 'add', oldNum: null, newNum: newStart === null ? null : newStart + k, text: newLines[k] })
+    }
+    parts.push({ header: '', context: '', lines })
+  }
+  const creates = list.length > 0 && list.every((hunk) => hunk.oldText == null)
+  const deletes = !creates && list.length > 0 && list.every((hunk) => hunk.newText == null || hunk.newText === '')
+  return { path, status: creates ? 'A' : deletes ? 'D' : 'M', hunks: parts }
+}
+
+/** `{ add, del }` totals of one prepared `FileDiff`. */
+function diffStats(file) {
+  let add = 0
+  let del = 0
+  for (const hunk of file.hunks) {
+    for (const line of hunk.lines) {
+      if (line.kind === 'add') add++
+      else if (line.kind === 'del') del++
+    }
+  }
+  return { add, del }
+}
+
+/**
+ * Resolve the hovered chip from a pointer event, or null when the pointer is
+ * not on a produced-file chip (or is inside the plugin's own popover).
+ */
+function chipTarget(event) {
+  const node = event.target
+  if (node === null || node === undefined || typeof node.closest !== 'function') return null
+  if (node.closest('[data-dsh-git="' + POPOVER_ATTR + '"]') !== null) return null
+  const chip = node.closest('[data-produced-files-row] button')
+  if (chip === null) return null
+  const path = chip.getAttribute('title') || chip.getAttribute(CHIP_PATH_ATTR)
+  if (path === null || path === '') return null
+  // Prefer the turn-tail wrapper; a tool-only turn (closing === null) renders
+  // the produced row through a bare div instead, so fall back to the chat seat.
+  const tail = chip.closest('[data-turn-tail]')
+  let rawTurn = tail === null ? null : tail.getAttribute('data-turn-tail')
+  if (rawTurn === null || rawTurn === '') {
+    const seat = chip.closest('[data-chat-turn]')
+    rawTurn = seat === null ? null : seat.getAttribute('data-chat-turn')
+  }
+  const turn = rawTurn === null || rawTurn === '' || !Number.isFinite(Number(rawTurn)) ? null : Number(rawTurn)
+  const rect = chip.getBoundingClientRect()
+  return {
+    chip,
+    path,
+    turn,
+    rect: { left: rect.left, top: rect.top, bottom: rect.bottom, width: rect.width },
+  }
+}
+
+function sameTarget(active, target) {
+  return active !== null
+    && active.path === target.path
+    && active.turn === target.turn
+    && active.rect.left === target.rect.left
+    && active.rect.top === target.rect.top
+}
+
+/**
+ * Open (or refresh) the popover for one chip, then resolve that file's diff.
+ * The host records write/edit results per turn, so one fetch covers every chip
+ * of the same turn.
+ */
+function openPopover(target) {
+  muteChipTitle(target.chip)
+  const sessionId = state.sessionId
+  const next = {
+    path: target.path,
+    turn: target.turn,
+    rect: target.rect,
+    sessionId,
+    status: 'loading',
+    file: null,
+    error: null,
+  }
+  setHover(next)
+  if (sessionId == null || target.turn === null) {
+    setHover({
+      ...next,
+      status: 'unavailable',
+      error: sessionId == null ? '未定位到当前会话' : '未定位到该回合',
+    })
+    return
+  }
+  loadTurnDiff(sessionId, target.turn).then((result) => {
+    if (hoverActive === null || hoverActive.path !== target.path || hoverActive.turn !== target.turn) return
+    const files = result && Array.isArray(result.files) ? result.files : []
+    const match = files.find((file) => file && file.path === target.path)
+      ?? files.find((file) => file && baseName(file.path) === baseName(target.path))
+    if (match === undefined) {
+      setHover({ ...hoverActive, status: 'empty' })
+      return
+    }
+    setHover({ ...hoverActive, status: 'ready', file: fileDiffFromHunks(match.path, match.hunks) })
+  }).catch((error) => {
+    if (hoverActive === null || hoverActive.path !== target.path || hoverActive.turn !== target.turn) return
+    setHover({ ...hoverActive, status: 'error', error: String((error && error.message) || error) })
+  })
+}
+
+function cancelHoverOpen() {
+  if (openTimer !== null) {
+    clearTimeout(openTimer)
+    openTimer = null
+  }
+}
+
+function cancelHoverClose() {
+  if (closeTimer !== null) {
+    clearTimeout(closeTimer)
+    closeTimer = null
+  }
+}
+
+function scheduleHoverClose(delay) {
+  cancelHoverOpen()
+  cancelHoverClose()
+  closeTimer = setTimeout(() => {
+    closeTimer = null
+    setHover(null)
+    restoreChipTitle()
+  }, delay)
+}
+
+function scheduleHoverOpen(target) {
+  cancelHoverOpen()
+  cancelHoverClose()
+  openTimer = setTimeout(() => {
+    openTimer = null
+    openPopover(target)
+  }, HOVER_OPEN_DELAY_MS)
+}
+
+function onHoverOver(event) {
+  if (event.target !== null && event.target !== undefined
+    && typeof event.target.closest === 'function'
+    && event.target.closest('[data-dsh-git="' + POPOVER_ATTR + '"]') !== null) {
+    cancelHoverClose()
+    return
+  }
+  const target = chipTarget(event)
+  if (target === null) {
+    // Leaving a chip for anywhere but the popover closes it after the grace
+    // period. Schedule at most one pending close: pointer movement keeps firing
+    // `mouseover` on child elements, and re-arming the timer on each one would
+    // let the popover live as long as the cursor keeps moving.
+    if (hoverActive !== null && closeTimer === null) scheduleHoverClose(HOVER_CLOSE_DELAY_MS)
+    return
+  }
+  if (sameTarget(hoverActive, target)) {
+    cancelHoverClose()
+    return
+  }
+  scheduleHoverOpen(target)
+}
+
+/** Closing immediately when the pointer leaves the window (no element to enter). */
+function onHoverOut(event) {
+  if (event.relatedTarget === null && hoverActive !== null) scheduleHoverClose(0)
+}
+
+/** Any scroll that is not the popover's own moves the chip away; drop it. */
+function onHoverScroll(event) {
+  const node = event.target
+  if (node !== null && node !== undefined && typeof node.closest === 'function'
+    && node.closest('[data-dsh-git="' + POPOVER_ATTR + '"]') !== null) return
+  if (hoverActive !== null) scheduleHoverClose(0)
+}
+
+function onHoverResize() {
+  if (hoverActive !== null) scheduleHoverClose(0)
+}
+
+function onHoverKey(event) {
+  if (event.key === 'Escape' && hoverActive !== null) scheduleHoverClose(0)
+}
+
+/** Install the delegated hover plumbing; returns its disposer. */
+function installHoverListeners() {
+  if (typeof document === 'undefined') return () => undefined
+  document.addEventListener('mouseover', onHoverOver, true)
+  document.addEventListener('mouseout', onHoverOut, true)
+  document.addEventListener('keydown', onHoverKey, true)
+  window.addEventListener('scroll', onHoverScroll, true)
+  window.addEventListener('resize', onHoverResize, true)
+  return () => {
+    document.removeEventListener('mouseover', onHoverOver, true)
+    document.removeEventListener('mouseout', onHoverOut, true)
+    document.removeEventListener('keydown', onHoverKey, true)
+    window.removeEventListener('scroll', onHoverScroll, true)
+    window.removeEventListener('resize', onHoverResize, true)
+    cancelHoverOpen()
+    cancelHoverClose()
+    restoreChipTitle()
+    hoverActive = null
+    hoverEmit()
+  }
+}
+
+/**
+ * Viewport-aware fixed placement: below the chip, or above when there is no
+ * room. The popover is intentionally as wide as the window allows (it may
+ * cover a side panel) so both code panes get real width; it is only clamped
+ * back inside the viewport.
+ */
+function popoverStyle(rect) {
+  const viewportWidth = window.innerWidth
+  const viewportHeight = window.innerHeight
+  const width = Math.max(360, Math.min(POPOVER_MAX_WIDTH, viewportWidth - POPOVER_VIEWPORT_MARGIN))
+  const left = Math.max(POPOVER_VIEWPORT_MARGIN / 2, Math.min(rect.left, viewportWidth - width - POPOVER_VIEWPORT_MARGIN / 2))
+  const spaceBelow = viewportHeight - rect.bottom - 16
+  const spaceAbove = rect.top - 16
+  const below = spaceBelow >= POPOVER_MIN_SPACE_BELOW || spaceBelow >= spaceAbove
+  const style = {
+    left,
+    width,
+    maxHeight: Math.max(180, Math.min(below ? spaceBelow : spaceAbove, POPOVER_MAX_HEIGHT)),
+  }
+  if (below) style.top = rect.bottom + 10
+  else style.bottom = viewportHeight - rect.top + 10
+  return style
+}
+
+/**
+ * The one popover instance, mounted in `shell.overlay`. Renders nothing while
+ * no chip is hovered.
+ *
+ * The body offers both ways to read a wide diff, and the choice sticks across
+ * hovers: `wrap` (default) folds long lines inside their own pane so both sides
+ * are visible at once, while the toggle swaps in the table's `min-width` floor
+ * and pans the pair with an always-visible horizontal scrollbar.
+ */
+function DiffHoverPopover() {
+  const active = useHover()
+  const [wrap, setWrap] = React.useState(true)
+  if (active === null) return null
+  if (typeof window === 'undefined') return null
+  const file = active.file
+  const stats = file === null ? null : diffStats(file)
+  return React.createElement('div', {
+    className: 'dg-diff-pop',
+    'data-dsh-git': POPOVER_ATTR,
+    style: popoverStyle(active.rect),
+    onMouseEnter: cancelHoverClose,
+    onMouseLeave: () => scheduleHoverClose(HOVER_CLOSE_DELAY_MS),
+  },
+    React.createElement('div', { className: 'dg-diff-pop-head' },
+      file !== null ? React.createElement('span', { className: 'dg-file-badge ' + statusBadgeClass(file.status) }, file.status) : null,
+      React.createElement('span', { className: 'dg-diff-pop-path', title: active.path }, active.path),
+      active.turn !== null ? React.createElement('span', { className: 'dg-diff-pop-turn' }, 'turn ' + active.turn) : null,
+      stats !== null ? React.createElement('span', { className: 'dg-diff-pop-stat' },
+        React.createElement('span', { className: 'dg-add' }, '+' + stats.add), ' ',
+        React.createElement('span', { className: 'dg-del' }, '−' + stats.del)) : null,
+      file !== null ? React.createElement('button', {
+        type: 'button',
+        className: 'dg-diff-pop-toggle',
+        title: wrap
+          ? '当前：长行折行显示（左右都看得全）。点击改为左右各自横向滚动（两侧联动）。'
+          : '当前：左右各自横向滚动（滚动其中一侧，另一侧跟着滚）。点击改为折行显示。',
+        onClick: () => setWrap((value) => !value),
+      }, wrap ? '⇄ 滚动' : '↵ 折行') : null),
+    React.createElement('div', { className: 'dg-diff-pop-body' },
+      active.status === 'loading'
+        ? React.createElement('div', { className: 'dg-loading' },
+            React.createElement('div', { className: 'dg-spinner' }),
+            '读取改动…')
+        : null,
+      active.status === 'ready' && file !== null
+        ? React.createElement(DiffViewer, { files: [file], hideHeader: true, wrap, panes: !wrap })
+        : null,
+      active.status === 'empty'
+        ? React.createElement('div', { className: 'dg-empty' },
+            React.createElement('div', { className: 'dg-empty-icon' }, '📄'),
+            React.createElement('div', null, '该回合没有记录这个文件的改动'))
+        : null,
+      active.status === 'unavailable' || active.status === 'error'
+        ? React.createElement('div', { className: 'dg-err' }, active.error || '读取改动失败')
+        : null))
 }
 
 /* ── Recent Turns (panel fallback) ───────────────────────────────── */
@@ -556,17 +1100,10 @@ function RecentTurns(props) {
             React.createElement('span', { className: 'dg-add' }, '+' + add), ' ',
             React.createElement('span', { className: 'dg-del' }, '−' + del))),
         opened ? React.createElement('div', { style: { margin: '4px 0 4px 18px' } },
-          t.files.map((f) => {
-            const fileDiffs = f.hunks.map((hx) => {
-              const oldLines = hx.oldText == null ? [] : (hx.oldText === '' ? [] : (hx.oldText.endsWith('\n') ? hx.oldText.slice(0, -1) : hx.oldText).split('\n'))
-              const newLines = hx.newText == null ? [] : (hx.newText === '' ? [] : (hx.newText.endsWith('\n') ? hx.newText.slice(0, -1) : hx.newText).split('\n'))
-              const hunkLines = []
-              for (let k = 0; k < oldLines.length; k++) hunkLines.push({ kind: 'del', oldNum: k + 1, newNum: null, text: oldLines[k] })
-              for (let k = 0; k < newLines.length; k++) hunkLines.push({ kind: 'add', oldNum: null, newNum: k + 1, text: newLines[k] })
-              return { header: '', context: '', lines: hunkLines }
-            })
-            return React.createElement(DiffViewer, { key: f.path, files: [{ path: f.path, status: 'M', hunks: fileDiffs }] })
-          })) : null)
+          t.files.map((f) => React.createElement(DiffViewer, {
+            key: f.path,
+            files: [fileDiffFromHunks(f.path, f.hunks)],
+          }))) : null)
     }))
 }
 
@@ -743,17 +1280,24 @@ function Panel() {
 
 /* ── Plugin Registration ─────────────────────────────────────────── */
 
-exports.inject = ['slots', 'connection', 'uiConversation']
+exports.inject = ['slots', 'connection']
 
 exports.apply = function apply(ctx) {
   rootCtx = ctx
   const slots = ctx.get === undefined ? ctx.slots : (ctx.get('slots') ?? ctx.slots)
   rootSlots = slots
   if (slots === undefined) return
-  const uiConversation = ctx.get === undefined ? ctx.uiConversation : ctx.get('uiConversation')
 
   ctx.effect(() => {
     mountCss()
+    /**
+     * Chat surfaces are read-only from here on: the official ui-deliverables
+     * entry owns `conversation.chat.turnTail`, and no dsh-git entry competes
+     * for it (nor for `conversation.chat.assistant-actions`). The per-turn
+     * diff lives in a hover popover raised from `shell.overlay` instead — see
+     * `installHoverListeners` / `DiffHoverPopover`.
+     */
+    const disposeHover = installHoverListeners()
     const disposeHeader = slots.inject('conversation.session.header.actions', () =>
       slots.register({
         name: 'conversation.session.header.actions',
@@ -767,22 +1311,20 @@ exports.apply = function apply(ctx) {
         id: 'dsh-git-panel',
         order: 100,
       }, Panel))
-    let disposeDefinition = () => undefined
-    if (uiConversation && uiConversation.events && typeof uiConversation.events.register === 'function') {
-      disposeDefinition = uiConversation.events.register(dshGitDiffsDefinition())
-    }
-    const disposeTurnTail = slots.inject('conversation.chat.turnTail', () =>
+    // List slot: additive, so the panel and the popover coexist. The popover is
+    // a bare fixed layer (it renders nothing until a chip is hovered) and waits
+    // its turn behind the panel in paint order while staying above it.
+    const disposePopover = slots.inject('shell.overlay', () =>
       slots.register({
-        name: 'conversation.chat.turnTail',
-        id: 'dsh-git-turn-diff',
-        select: selectTurnDiffs,
-        order: 10,
-      }, TurnDiffSummary))
+        name: 'shell.overlay',
+        id: 'dsh-git-diff-hover',
+        order: 90,
+      }, DiffHoverPopover))
     return () => {
+      disposeHover()
       disposeHeader()
       disposePanel()
-      disposeTurnTail()
-      disposeDefinition()
+      disposePopover()
       rootCtx = null
       rootSlots = null
       setState({ open: false, sessionId: null })

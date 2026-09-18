@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "dsh-git profile bundle: git status/diff/commit/file preview in the DeepSeek Harness web UI.",
   "type": "module",
+  "packageManager": "pnpm@11.7.0",
   "main": "lib/index.js",
   "exports": {
     ".": "./lib/index.js",
@@ -17,6 +18,9 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "dev": "node scripts/watch.mjs",
+    "verify:client": "node scripts/verify-client.mjs",
+    "verify:host": "node scripts/verify-host.mjs",
+    "verify": "node scripts/verify-host.mjs && node scripts/verify-client.mjs",
     "prepare": "node scripts/build.mjs",
     "prepack": "node scripts/build.mjs"
   },
