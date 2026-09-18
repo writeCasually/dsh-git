@@ -545,6 +545,15 @@ installHoverListeners（apply 时安装，dispose 时移除）
   - 两种模式的每一行都来自同一个 `diffRowDescriptors(file)` 列表（hunk 分隔/上下文/代码行），
     所以切换模式不会改变行的内容与顺序。
   - 面板内保持原有"最宽行撑开 + 横向滚动"的单表模式。
+- **加/删文字色随主题自适应**：设计系统里 `--dsw-alias-state-success-primary` 明暗两套主题都是
+  同一个 green-500（`rgb(34,197,94)`）——在浅色底上只有 **2.28:1** 对比度（而删除色用的是
+  red-600，4.5:1），这就是"绿色字体太亮、有点看不清"的来源。插件把加/删文字色统一改成
+  `color-mix(in srgb, <state> 60%, var(--dsw-alias-label-primary))`：浅色主题混向近黑 →
+  `rgb(26,126,65)`（5.18:1），深色主题混向近白 → `rgb(120,218,157)`（10.69:1）。
+  这两个值声明在 `.dg-panel,.dg-diff-pop` 上成为 `--dg-add-fg` / `--dg-del-fg`
+  （主题 token 定义在 `body` 而不是 `:root`，声明在 `:root` 会解析不到），加/删的代码文字、
+  行号、`+/-` 标记、徽标字母与 `+A −R` 统计全部走这两个变量；行底色仍用原始 token 的
+  6–9% 淡色，色相语义不变、只是不再刺眼。
 - **原生 tooltip 静音**：chip 的 `title` 会被临时移到 `data-dsh-git-path` 并移除，避免浏览器
   tooltip 稍后压在浮窗上；浮窗关闭或切换到别的 chip 时原样还回。
 - **关闭时机**：移出 chip/浮窗 180ms 后、`Esc`、聊天流滚动（浮窗内部滚动不算）、窗口尺寸变化。
@@ -604,8 +613,9 @@ ctx.effect(() => ctx.webServer.register({ kind:'prefix', path:'/dsh-git', handle
   锚定输入不泄漏进 payload、同一文件每次请求只读一次）。
 
 ### 回归校验
-`scripts/verify-client.mjs` 为 39 项检查：聊天槽位里没有 dsh-git 条目、`shell.overlay`
+`scripts/verify-client.mjs` 为 41 项检查：聊天槽位里没有 dsh-git 条目、`shell.overlay`
 同时存在面板与浮窗、悬停延时后才打开、按 `sessionId+turn` 只请求一次、头部路径/回合/徽标/±、
+**加/删文字色走主题自适应变量而非原始 state token**、
 六列左右对照与短侧占位对齐、**浮窗默认折行（无 min-width 下限）**、
 **切到滚动模式后左右各一个 `.dg-pane`（各自 min-width 下限、各自渲染本侧单元格），
 一侧 scrollLeft 变化时另一侧镜像（双向），且行号/符号列 `position:sticky` 不透明地钉在左缘**、

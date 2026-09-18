@@ -281,6 +281,19 @@ async function hoverScenario({ files = FULL_TURN, error = null, sessionId = 'S1'
       && pop?.querySelector('table.dg-diff-split')?.getAttribute('style') === null,
     pop?.querySelector('table.dg-diff-split')?.getAttribute('style') ?? 'no inline min-width')
 
+  // The raw state token is a saturated green-500 (~2.3:1 on the light theme
+  // background — the "too bright / hard to read" report). Add/remove text must
+  // go through the theme-adaptive tone instead.
+  const styleText = document.getElementById('dsh-git-style')?.textContent ?? ''
+  check('diff colors: the plugin declares a theme-adaptive add/remove tone',
+    styleText.includes('--dg-add-fg:color-mix(') && styleText.includes('--dg-del-fg:color-mix('))
+  const addCell = container.querySelector('.dg-diff-pop td.dg-ds-add.dg-ds-code')
+  const delCell = container.querySelector('.dg-diff-pop td.dg-ds-del.dg-ds-code')
+  check('diff colors: changed code lines use that tone, not the raw state color',
+    /--dg-add-fg/.test(dom.window.getComputedStyle(addCell).color)
+      && /--dg-del-fg/.test(dom.window.getComputedStyle(delCell).color),
+    `${dom.window.getComputedStyle(addCell).color} / ${dom.window.getComputedStyle(delCell).color}`)
+
   // The head toggle swaps wrap for VSCode-style scroll: one table per side,
   // each in its own scroll pane, mirrored to each other.
   const toggle = pop?.querySelector('.dg-diff-pop-toggle')
